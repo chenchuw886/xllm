@@ -23,6 +23,7 @@ limitations under the License.
 #include <iostream>
 #include <numeric>
 #include <optional>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -178,6 +179,37 @@ std::vector<int> to_atb_linear_quant_types(
     atb_linear_quant_types.emplace_back(static_cast<int>(linear_quant_type));
   }
   return atb_linear_quant_types;
+}
+
+std::string format_selected_experts(
+    const atb::SVector<int32_t>& selected_experts) {
+  std::ostringstream stream;
+  for (size_t index = 0; index < selected_experts.size(); ++index) {
+    if (index > 0) {
+      stream << ",";
+    }
+    stream << selected_experts[index];
+  }
+  return stream.str();
+}
+
+void log_glm5_decoder_exec_param(
+    int32_t layer_id,
+    const std::string& stage,
+    const atb_speed::deepseekV2::DecoderLayerParam& param) {
+  LOG(INFO) << "GLM5 decoder exec params: layer_id=" << layer_id
+            << ", stage=" << stage
+            << ", qkRopeHeadDim=" << param.qkRopeHeadDim
+            << ", kvLoraRank=" << param.kvLoraRank
+            << ", index_head_dim=" << param.index_head_dim
+            << ", index_n_heads=" << param.index_n_heads
+            << ", index_topk=" << param.index_topk
+            << ", skipTopk=" << std::boolalpha << param.skipTopk
+            << ", outputTopk=" << std::boolalpha << param.outputTopk
+            << ", numOfSharedExperts=" << param.numOfSharedExperts
+            << ", numOfSelectedExperts=["
+            << format_selected_experts(param.numOfSelectedExperts) << "]"
+            << ", firstKDenseReplace=" << param.firstKDenseReplace;
 }
 }  // namespace
 
@@ -466,6 +498,10 @@ void NpuDeepseekV32DecoderLayerImpl::param_from_args(
   initialize_mlp_parameters(param, args, parallel_args);
   initialize_parallel_parameters(param, parallel_args);
   initialize_quantization_parameters(param);
+  if (layer_id_ == 0 && args.model_type().find("glm_moe_dsa") != std::string::npos) {
+    const std::string stage = is_prefill ? "prefill" : "decode";
+    log_glm5_decoder_exec_param(layer_id_, stage, param);
+  }
 }
 
 void NpuDeepseekV32DecoderLayerImpl::initialize_basic_parameters(
