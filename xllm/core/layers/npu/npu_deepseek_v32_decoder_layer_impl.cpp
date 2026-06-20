@@ -193,6 +193,19 @@ std::string format_selected_experts(
   return stream.str();
 }
 
+bool should_log_glm5_decoder_exec_param(int32_t layer_id,
+                                        int32_t first_k_dense_replace) {
+  if (layer_id == 0) {
+    return true;
+  }
+  if (first_k_dense_replace <= 0) {
+    return layer_id <= 1;
+  }
+  return layer_id == first_k_dense_replace - 1 ||
+         layer_id == first_k_dense_replace ||
+         layer_id == first_k_dense_replace + 1;
+}
+
 void log_glm5_decoder_exec_param(
     int32_t layer_id,
     const std::string& stage,
@@ -206,10 +219,15 @@ void log_glm5_decoder_exec_param(
             << ", index_topk=" << param.index_topk
             << ", skipTopk=" << std::boolalpha << param.skipTopk
             << ", outputTopk=" << std::boolalpha << param.outputTopk
+            << ", isDenseLayer=" << std::boolalpha << param.isDenseLayer
             << ", numOfSharedExperts=" << param.numOfSharedExperts
             << ", numOfSelectedExperts=["
             << format_selected_experts(param.numOfSelectedExperts) << "]"
-            << ", firstKDenseReplace=" << param.firstKDenseReplace;
+            << ", firstKDenseReplace=" << param.firstKDenseReplace
+            << ", numOfGroups=" << param.numOfGroups
+            << ", routingMethod=" << param.routingMethod
+            << ", enableFusedTopk=" << std::boolalpha
+            << param.enableFusedTopk;
 }
 }  // namespace
 
@@ -498,7 +516,9 @@ void NpuDeepseekV32DecoderLayerImpl::param_from_args(
   initialize_mlp_parameters(param, args, parallel_args);
   initialize_parallel_parameters(param, parallel_args);
   initialize_quantization_parameters(param);
-  if (layer_id_ == 0 && args.model_type().find("glm_moe_dsa") != std::string::npos) {
+  if (args.model_type().find("glm_moe_dsa") != std::string::npos &&
+      should_log_glm5_decoder_exec_param(layer_id_,
+                                         args.first_k_dense_replace())) {
     const std::string stage = is_prefill ? "prefill" : "decode";
     log_glm5_decoder_exec_param(layer_id_, stage, param);
   }
