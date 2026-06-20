@@ -131,7 +131,9 @@ TORCH_MODULE(GlmMoeDsaMtpForCausalLM);
 // register the causal model
 REGISTER_CAUSAL_MODEL(glm_moe_dsa_mtp, GlmMoeDsaMtpForCausalLM);
 
-REGISTER_MODEL_ARGS(glm_moe_dsa_mtp, [&] {
+REGISTER_MODEL_ARGS(
+  glm_moe_dsa_mtp,
+  ([&] {
   LOAD_ARG_OR(model_type, "model_type", "glm_moe_dsa_mtp");
   LOAD_ARG_OR(dtype, "dtype", "");
   LOAD_ARG_OR(attention_bias, "attention_bias", false);
@@ -195,5 +197,5 @@ REGISTER_MODEL_ARGS(glm_moe_dsa_mtp, [&] {
   SET_ARG(stop_token_ids,
           std::unordered_set<int32_t>(args->eos_token_id_vec().begin(),
                                       args->eos_token_id_vec().end()));
-});
+  }));
 }  // namespace xllm::npu::model
