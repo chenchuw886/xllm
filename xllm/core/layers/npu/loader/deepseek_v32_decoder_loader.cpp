@@ -1043,6 +1043,7 @@ void DeekseekV32DecoderLoader::preprocess_linear_for_rope() {
 
   std::vector<std::string> indexer_linear_for_rope;
   indexer_linear_for_rope.reserve(10);
+  int32_t processed_indexer_rope_tensors = 0;
   indexer_linear_for_rope.emplace_back("self_attn.indexer.wq_b.weight");
   if (is_attn_dynamic_desc(kIndexerWqBLinearIndex)) {
     indexer_linear_for_rope.emplace_back("self_attn.indexer.wq_b.weight_offset");
@@ -1065,6 +1066,7 @@ void DeekseekV32DecoderLoader::preprocess_linear_for_rope() {
     if (t[index].sizes() == std::vector<int64_t>({1})) {
       continue;
     }
+    ++processed_indexer_rope_tensors;
     t[index] = view_indexer_tensor(t[index], name, true);
     t[index] = trans_front_rope_weight(t[index]);
     t[index] = view_indexer_tensor(t[index], name, false);
@@ -1072,6 +1074,10 @@ void DeekseekV32DecoderLoader::preprocess_linear_for_rope() {
       t[index] = t[index].flatten();
     }
   }
+  LOG(INFO) << "GLM5 indexer rope preprocessing applied at layer " << layer_id_
+            << ", processed_tensors=" << processed_indexer_rope_tensors
+            << ", indexer_rope_interleave=" << std::boolalpha
+            << indexer_rope_interleave_;
 }
 
 torch::Tensor DeekseekV32DecoderLoader::view_tensor(torch::Tensor weight,
