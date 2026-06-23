@@ -1042,7 +1042,7 @@ void DeekseekV32DecoderLoader::preprocess_linear_for_rope() {
   }
 
   std::vector<std::string> indexer_linear_for_rope;
-  indexer_linear_for_rope.reserve(10);
+  indexer_linear_for_rope.reserve(5);
   int32_t processed_indexer_rope_tensors = 0;
   indexer_linear_for_rope.emplace_back("self_attn.indexer.wq_b.weight");
   if (is_attn_dynamic_desc(kIndexerWqBLinearIndex)) {
@@ -1053,16 +1053,17 @@ void DeekseekV32DecoderLoader::preprocess_linear_for_rope() {
     indexer_linear_for_rope.emplace_back("self_attn.indexer.wq_b.deq_scale");
   }
   indexer_linear_for_rope.emplace_back("self_attn.indexer.wk.weight");
-  indexer_linear_for_rope.emplace_back("self_attn.indexer.wk.weight_offset");
-  indexer_linear_for_rope.emplace_back("self_attn.indexer.wk.weight_scale");
-  indexer_linear_for_rope.emplace_back("self_attn.indexer.wk.quant_bias");
-  indexer_linear_for_rope.emplace_back("self_attn.indexer.wk.deq_scale");
 
   for (const auto& name : indexer_linear_for_rope) {
     if (!use_quant_weight_mapping() && !absl::EndsWith(name, "weight")) {
       continue;
     }
-    int index = WEIGHT_MAPPING_W8A8.at(name);
+    auto index_it = WEIGHT_MAPPING_W8A8.find(name);
+    if (index_it == WEIGHT_MAPPING_W8A8.end()) {
+      LOG(WARNING) << "Skip unsupported GLM5 indexer rope tensor: " << name;
+      continue;
+    }
+    int index = index_it->second;
     if (t[index].sizes() == std::vector<int64_t>({1})) {
       continue;
     }
