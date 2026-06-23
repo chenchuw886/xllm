@@ -229,44 +229,6 @@ void log_glm5_decoder_exec_param(
             << ", enableFusedTopk=" << std::boolalpha
             << param.enableFusedTopk;
 }
-
-bool is_glm5_model_type(const std::string& model_type) {
-  return model_type.find("glm_moe_dsa") != std::string::npos;
-}
-
-char get_glm5_indexer_type_char(const DsaTopkShareDecision& decision) {
-  return decision.reuse_topk ? 'S' : 'F';
-}
-
-std::string get_glm5_indexer_type_name(const DsaTopkShareDecision& decision) {
-  return decision.reuse_topk ? "shared" : "full";
-}
-
-void log_glm5_topk_share_plan(const ModelArgs& args) {
-  std::string inferred_pattern;
-  inferred_pattern.reserve(static_cast<size_t>(args.n_layers()));
-  for (int64_t layer_id = 0; layer_id < args.n_layers(); ++layer_id) {
-    const DsaTopkShareDecision decision =
-        get_dsa_topk_share_decision(args, static_cast<int32_t>(layer_id));
-    inferred_pattern.push_back(get_glm5_indexer_type_char(decision));
-  }
-
-  LOG(INFO) << "GLM5 inferred DSA share plan: n_layers=" << args.n_layers()
-            << ", index_topk_freq=" << args.index_topk_freq()
-            << ", index_skip_topk_offset=" << args.index_skip_topk_offset()
-            << ", index_topk_pattern='" << args.index_topk_pattern()
-            << "', inferred_pattern='" << inferred_pattern << "'";
-
-  for (int64_t layer_id = 0; layer_id < args.n_layers(); ++layer_id) {
-    const DsaTopkShareDecision decision =
-        get_dsa_topk_share_decision(args, static_cast<int32_t>(layer_id));
-    LOG(INFO) << "GLM5 inferred DSA layer: layer_id=" << layer_id
-              << ", inferred_indexer_type='"
-              << get_glm5_indexer_type_name(decision) << "'"
-              << ", skip_topk=" << std::boolalpha << decision.reuse_topk
-              << ", output_topk=" << std::boolalpha << decision.output_topk;
-  }
-}
 }  // namespace
 
 enum DecoderLayerTensorId : int {
@@ -438,9 +400,6 @@ NpuDeepseekV32DecoderLayerImpl::NpuDeepseekV32DecoderLayerImpl(
   output_topk_ = topk_decision.output_topk;
 
   rank_ = parallel_args.rank();
-  if (rank_ == 0 && layer_id_ == 0 && is_glm5_model_type(model_args.model_type())) {
-    log_glm5_topk_share_plan(model_args);
-  }
   first_k_dense_replace_ = model_args.first_k_dense_replace();
   n_layers_ = model_args.n_layers();
   num_experts_ = model_args.n_routed_experts();
