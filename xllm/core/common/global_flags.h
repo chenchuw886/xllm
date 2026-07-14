@@ -118,6 +118,16 @@ DECLARE_bool(enable_mm_encoder_dp);
 
 DECLARE_bool(enable_multi_stream_parallel);
 
+DECLARE_bool(enable_flashcomm1);
+
+DECLARE_bool(enable_flashcomm1_graph);
+
+DECLARE_bool(enable_flashcomm1_mmrs);
+
+DECLARE_bool(enable_flashcomm1_quant_allgather);
+
+DECLARE_bool(enable_flashcomm1_router_sp);
+
 DECLARE_int32(micro_batch_num);
 
 DECLARE_bool(enable_dp_balance);

@@ -605,6 +605,10 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
                                                 quant_args,
                                                 parallel_args.tp_group_,
                                                 options));
+  // FlashComm1: o_b_proj is the attention TP RowParallel whose tail all-reduce
+  // becomes a padded reduce-scatter(dim0) when a FlashComm1 context is active.
+  // Marking it eligible is a no-op unless FlashComm1 is enabled at runtime.
+  o_b_proj_->set_flash_comm1_eligible(true);
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>

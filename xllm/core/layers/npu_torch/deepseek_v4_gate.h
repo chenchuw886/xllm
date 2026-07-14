@@ -43,6 +43,7 @@ class DeepseekV4GateImpl : public torch::nn::Module {
   void load_state_dict(const StateDict& state_dict);
 
   bool is_hash_layer() const { return hash_layer_; }
+  int64_t num_experts() const { return n_routed_experts_; }
 
  private:
   std::tuple<torch::Tensor, torch::Tensor> select_experts_native(

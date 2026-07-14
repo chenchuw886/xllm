@@ -61,6 +61,50 @@ DEFINE_bool(
     "Whether to enable computation communication parallel by two streams "
     "and two micro batches in prefill stage.");
 
+DEFINE_bool(
+    enable_flashcomm1,
+    false,
+    "Whether to enable FlashComm1 (sequence parallel): replace the tail "
+    "all-reduce of TP RowParallel layers with a padded reduce-scatter(dim0) so "
+    "the residual stream stays token-sharded, and restore the full token dim "
+    "with an all-gather at sequence-parallel boundaries. Requires tp>1 and "
+    "benefits high-token (prefill / chunked-prefill) batches.");
+
+DEFINE_bool(
+    enable_flashcomm1_graph,
+    false,
+    "Whether to let FlashComm1 stay active inside ACL graph (decode) forwards. "
+    "Requires enable_flashcomm1. Under ACL graph the token dimension is padded "
+    "to a fixed per-graph bucket, so the FlashComm1 shard / all-gather / "
+    "reduce-scatter shapes are stable across capture and replay. No effect when "
+    "enable_flashcomm1 is false or when graph mode is disabled.");
+
+DEFINE_bool(
+    enable_flashcomm1_mmrs,
+    false,
+    "Whether to use fused matmul + reduce-scatter for eligible FlashComm1 "
+    "RowParallel tails. This capability is independent of activation "
+    "all-gather quantization and falls back to matmul + reduce-scatter when "
+    "the fused operator is unavailable. Requires enable_flashcomm1.");
+
+DEFINE_bool(
+    enable_flashcomm1_quant_allgather,
+    false,
+    "Whether to quantize FlashComm1 activation all-gather payloads to int8. "
+    "This is lossy and adds a second scale all-gather, so it is disabled by "
+    "default and should only be enabled after an accuracy and payload-size "
+    "evaluation. With router sequence parallelism enabled, the current layer's "
+    "MoE routing is computed before this quantization. Requires "
+    "enable_flashcomm1.");
+
+DEFINE_bool(
+    enable_flashcomm1_router_sp,
+    true,
+    "Whether to compute MoE routing on the local FlashComm1 token shard and "
+    "overlap the hidden-state all-gather with gate computation. Routing "
+    "metadata is packed into one additional all-gather. Disable this option "
+    "to use the full-token gate as an ablation baseline.");
+
 DEFINE_int32(micro_batch_num,
              1,
              "Default use two micro batches for multi-stream parallel.");
@@ -86,6 +130,11 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefill_sp);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mm_encoder_dp);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_multi_stream_parallel);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1_graph);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1_mmrs);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1_quant_allgather);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1_router_sp);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(micro_batch_num);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dp_balance);
 }
@@ -102,6 +151,11 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefill_sp);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mm_encoder_dp);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_multi_stream_parallel);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1_graph);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1_mmrs);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1_quant_allgather);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1_router_sp);
   XLLM_CONFIG_ASSIGN_FROM_JSON(micro_batch_num);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dp_balance);
 }
@@ -126,6 +180,16 @@ void ParallelConfig::append_config_json(
       config_json, default_config, enable_mm_encoder_dp);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_multi_stream_parallel);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flashcomm1);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flashcomm1_graph);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flashcomm1_mmrs);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flashcomm1_quant_allgather);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flashcomm1_router_sp);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, micro_batch_num);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

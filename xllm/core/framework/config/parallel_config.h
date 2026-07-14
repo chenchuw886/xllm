@@ -52,6 +52,11 @@ class ParallelConfig final {
          "enable_prefill_sp",
          "enable_mm_encoder_dp",
          "enable_multi_stream_parallel",
+         "enable_flashcomm1",
+         "enable_flashcomm1_graph",
+         "enable_flashcomm1_mmrs",
+         "enable_flashcomm1_quant_allgather",
+         "enable_flashcomm1_router_sp",
          "micro_batch_num",
          "enable_dp_balance"}};
     return kOptionCategory;
@@ -81,6 +86,30 @@ class ParallelConfig final {
   PROPERTY(bool, enable_mm_encoder_dp) = false;
 
   PROPERTY(bool, enable_multi_stream_parallel) = false;
+
+  // FlashComm1 (sequence parallel): turn RowParallel tail all-reduce into a
+  // padded reduce-scatter(dim0) and delay the all-gather to SP boundaries.
+  PROPERTY(bool, enable_flashcomm1) = false;
+
+  // Keep FlashComm1 active inside ACL graph (decode) forwards. The graph token
+  // dim is padded to a fixed per-graph bucket, so FlashComm1 shapes stay stable
+  // across capture / replay. Requires enable_flashcomm1.
+  PROPERTY(bool, enable_flashcomm1_graph) = false;
+
+  // Fused matmul/reduce-scatter for eligible RowParallel tails. Kept
+  // independent from activation all-gather quantization so each optimization
+  // can be measured and disabled separately. Requires enable_flashcomm1.
+  PROPERTY(bool, enable_flashcomm1_mmrs) = false;
+
+  // Lossy int8 activation all-gather. With Router-SP enabled, the current
+  // layer's gate runs on the local BF16/FP16 shard before this communication.
+  // Requires enable_flashcomm1.
+  PROPERTY(bool, enable_flashcomm1_quant_allgather) = false;
+
+  // Compute Gate/top-k on the local token shard and overlap the lossless hidden
+  // all-gather with the gate. Disable to retain the full-token gate as a
+  // controlled ablation path.
+  PROPERTY(bool, enable_flashcomm1_router_sp) = true;
 
   PROPERTY(int32_t, micro_batch_num) = 1;
 

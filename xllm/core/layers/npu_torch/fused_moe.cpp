@@ -34,6 +34,7 @@ limitations under the License.
 
 #include "framework/config/eplb_config.h"
 #include "framework/config/kernel_config.h"
+#include "framework/parallel_state/flash_comm1_context.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
@@ -1083,33 +1084,44 @@ torch::Tensor FusedMoEImpl::forward_expert(
   // reshape the final hidden states to the original shape
   final_hidden_states = final_hidden_states.reshape(hidden_states_shape);
 
+  // FlashComm1: when active, the TP reduction is a padded reduce-scatter(dim0)
+  // so the residual stream stays token-sharded. The MoE input was already
+  // all-gathered to full tokens by the decoder layer, so the sum is identical
+  // to the baseline all-reduce; only the output token dim is sharded. The EP
+  // reduction is unaffected. When FlashComm1 is inactive this is a plain
+  // all-reduce (unchanged behavior).
+  auto tp_reduce = [](torch::Tensor tensor,
+                      ProcessGroup* pg) -> torch::Tensor {
+    if (parallel_state::flash_comm1_active()) {
+      return parallel_state::reduce_scatter_padded_dim0(tensor, pg);
+    }
+    return parallel_state::reduce(tensor, pg);
+  };
+
   if (shared_output.has_value()) {
     if (parallel_args_.ep_size() == 1) {
       // reduce(a) + reduce(b) == reduce(a + b). Combining the routed and shared
       // partial outputs avoids one small TP allreduce in each MoE decode layer.
       final_hidden_states.add_(shared_output.value());
       if (tp_pg_->world_size() > 1) {
-        final_hidden_states =
-            parallel_state::reduce(final_hidden_states, tp_pg_);
+        final_hidden_states = tp_reduce(final_hidden_states, tp_pg_);
       }
     } else {
       if (tp_pg_->world_size() > 1) {
-        final_hidden_states =
-            parallel_state::reduce(final_hidden_states, tp_pg_);
+        final_hidden_states = tp_reduce(final_hidden_states, tp_pg_);
       }
       final_hidden_states = parallel_state::reduce(
           final_hidden_states, parallel_args_.moe_ep_group_);
 
       auto reduced_shared_output = shared_output.value();
       if (tp_pg_->world_size() > 1) {
-        reduced_shared_output =
-            parallel_state::reduce(reduced_shared_output, tp_pg_);
+        reduced_shared_output = tp_reduce(reduced_shared_output, tp_pg_);
       }
       final_hidden_states = final_hidden_states + reduced_shared_output;
     }
   } else {
     if (tp_pg_->world_size() > 1) {
-      final_hidden_states = parallel_state::reduce(final_hidden_states, tp_pg_);
+      final_hidden_states = tp_reduce(final_hidden_states, tp_pg_);
     }
     if (parallel_args_.ep_size() > 1) {
       final_hidden_states = parallel_state::reduce(

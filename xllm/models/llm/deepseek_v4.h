@@ -34,6 +34,9 @@ limitations under the License.
 
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/parallel_state/flash_comm1_context.h"
+#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/kernels/ops_api.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -421,6 +424,8 @@ class DeepseekV4ModelImpl
 
     num_heads_ = model_args.n_heads();
     head_dim_ = model_args.o_lora_rank() + model_args.qk_rope_head_dim();
+    tp_group_ = parallel_args.tp_group_;
+    dp_size_ = parallel_args.dp_size();
     dp_local_tp_size_ =
         std::max<int64_t>(parallel_args.world_size() /
                               std::max<int64_t>(parallel_args.dp_size(), 1),
@@ -743,6 +748,74 @@ class DeepseekV4ModelImpl
     }
 
     std::optional<torch::Tensor> residual;
+    // FlashComm1: token-shard the (replicated) hidden stream across the TP group
+    // for the whole decoder stack. Each layer all-gathers to full tokens before
+    // attention / MoE and reduce-scatters back, so norm / gate / hc run on
+    // 1/tp_world_size tokens. A no-op when --enable_flashcomm1 is false.
+    //
+    // ACL graph: under ACL graph the executor pads the token dimension to a
+    // fixed per-graph bucket (get_bucket_num_tokens, multiples of 16 for large
+    // batches), and each bucket is captured as its own graph. `h.size(0)` is
+    // therefore constant for a given captured graph, which keeps every
+    // FlashComm1 shard / all-gather / reduce-scatter shape stable across capture
+    // and replay. Graph forwards always execute on the bucket-sized persistent
+    // buffer (including is_graph_empty_dp_rank padding forwards), so the graph
+    // path must NOT gate on is_empty_dp_rank: all TP ranks have to join the
+    // FlashComm1 collectives to keep the group in sync. Graph activation is
+    // opt-in behind --enable_flashcomm1_graph; the eager path keeps its original
+    // non-empty-rank guard.
+    const int64_t fc1_num_tokens = h.defined() ? h.size(0) : 0;
+    const auto& fc1_parallel_cfg = ParallelConfig::get_instance();
+    const bool fc1_tp_ok = fc1_parallel_cfg.enable_flashcomm1() &&
+                           tp_group_ != nullptr &&
+                           tp_group_->world_size() > 1 &&
+                           dp_size_ == 1 &&
+                           fc1_num_tokens >= tp_group_->world_size();
+    const bool fc1_enabled =
+        fc1_tp_ok && (acl_graph_forward
+                          ? fc1_parallel_cfg.enable_flashcomm1_graph()
+                          : !is_empty_dp_rank);
+    const bool fc1_mmrs_enabled =
+        fc1_enabled && fc1_parallel_cfg.enable_flashcomm1_mmrs() &&
+        tp_group_->world_size() <= 8;
+    const bool fc1_quant_allgather_enabled =
+        fc1_enabled && fc1_parallel_cfg.enable_flashcomm1_quant_allgather();
+    if (fc1_parallel_cfg.enable_flashcomm1() && dp_size_ > 1) {
+      LOG_FIRST_N(WARNING, 1)
+          << "[FlashComm1] disabled because DP+TP token ownership is not "
+             "supported yet: dp_size="
+          << dp_size_;
+    }
+    if (fc1_enabled && fc1_parallel_cfg.enable_flashcomm1_mmrs() &&
+        tp_group_->world_size() > 8) {
+      LOG_FIRST_N(WARNING, 1)
+          << "[FlashComm1] MMRS disabled because tp_world_size > 8: "
+          << tp_group_->world_size();
+    }
+    parallel_state::FlashComm1Guard fc1_guard(
+        fc1_enabled,
+        fc1_num_tokens,
+        fc1_enabled ? tp_group_->rank() : 0,
+        fc1_enabled ? tp_group_->world_size() : 1,
+        tp_group_,
+        fc1_mmrs_enabled,
+        fc1_quant_allgather_enabled,
+        fc1_parallel_cfg.enable_flashcomm1_router_sp());
+    if (parallel_state::flash_comm1_active()) {
+      LOG_FIRST_N(INFO, 1) << "[FlashComm1] active: tp_world_size="
+                           << tp_group_->world_size()
+                           << ", num_tokens=" << fc1_num_tokens
+                           << ", graph=" << (acl_graph_forward ? 1 : 0)
+                           << ", mmrs=" << (fc1_mmrs_enabled ? 1 : 0)
+                           << ", quant_allgather="
+                           << (fc1_quant_allgather_enabled ? 1 : 0)
+                           << ", router_sp="
+                           << (fc1_parallel_cfg.enable_flashcomm1_router_sp()
+                                   ? 1
+                                   : 0);
+      h = parallel_state::shard_dim0_padded(
+          h, tp_group_->rank(), tp_group_->world_size());
+    }
     for (size_t i = 0; i < layers_.size(); i++) {
       if (attn_metadata.dsa_metadata) {
         auto& dsa = *(attn_metadata.dsa_metadata);
@@ -815,6 +888,11 @@ class DeepseekV4ModelImpl
     }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    // FlashComm1: restore the full token dimension before logits/pooler.
+    if (parallel_state::flash_comm1_active()) {
+      hidden_states = parallel_state::all_gather_dim0_unpad(
+          hidden_states, tp_group_, fc1_num_tokens);
+    }
     return ModelOutput(hidden_states, residual_out);
   }
 
@@ -1523,12 +1601,16 @@ class DeepseekV4ModelImpl
   int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
+  int64_t dp_size_ = 1;
   int64_t head_dim_ = 0;
   int64_t window_size_ = 128;
   int64_t index_n_heads_ = 0;
   int64_t index_head_dim_ = 0;
   int64_t index_topk_ = 512;
   torch::Device device_{torch::kCPU};
+
+  // TP process group, used only for FlashComm1 sequence-parallel boundaries.
+  ProcessGroup* tp_group_ = nullptr;
 
   // DSA cache group info: built once at model init from compress_ratios
   // caches_info_[layer_id] = vector of DSACacheInfo for each cache in that

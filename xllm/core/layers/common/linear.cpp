@@ -21,9 +21,14 @@ limitations under the License.
 #include <algorithm>
 #include <cctype>
 
+#include "framework/parallel_state/flash_comm1_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
+
+#if defined(USE_NPU)
+#include <ATen/core/dispatch/Dispatcher.h>
+#endif
 
 namespace xllm {
 namespace layer {
@@ -506,6 +511,135 @@ torch::Tensor dcu_w8a8_dynamic_linear_forward(
   return xllm::kernel::scaled_matmul(matmul_params);
 }
 #endif  // USE_DCU
+
+#if defined(USE_NPU)
+// FlashComm1: fused matmul + reduce-scatter tail for the RowParallel layers
+// that participate in FlashComm1. Calls torch_npu's npu_mm_reduce_scatter_base
+// through the PyTorch dispatcher (its C++ surface is internal, so we invoke the
+// registered op boxed and fill arguments by schema name to stay robust across
+// torch_npu / CANN versions and optional-argument ordering).
+//
+// Semantics: computes reduce_scatter_dim0(x1 @ x2) so the caller receives the
+// token-sharded [ceil(M/ws), N] output directly, matching
+// reduce_scatter_padded_dim0(matmul(x1, x2)). Returns an undefined tensor when
+// the op or a required argument is unavailable, so the caller falls back to the
+// unfused path. `x2_scale` / `pertoken_scale` / `output_dtype` are only used for
+// the quantized (w8a8) path; leave them empty for the bf16 path.
+torch::Tensor try_npu_mm_reduce_scatter_base(
+    const torch::Tensor& x1,
+    const torch::Tensor& x2,
+    const std::string& hcom,
+    int64_t world_size,
+    const std::optional<torch::Tensor>& x2_scale,
+    const std::optional<torch::Tensor>& pertoken_scale,
+    std::optional<torch::ScalarType> output_dtype) {
+  static const auto handle = c10::Dispatcher::singleton().findOp(
+      c10::OperatorName{"npu::npu_mm_reduce_scatter_base", ""});
+  if (!handle.has_value()) {
+    LOG_FIRST_N(WARNING, 1)
+        << "[FlashComm1] npu::npu_mm_reduce_scatter_base is not registered "
+           "in this torch_npu build; falling back to unfused reduce-scatter.";
+    return torch::Tensor();
+  }
+
+  const auto& schema = handle->schema();
+  const bool is_quant = x2_scale.has_value();
+  // Probe the schema for the quantization arguments we need before committing to
+  // the fused quant path; if any is missing we must not silently drop the scale.
+  bool has_x2_scale = false;
+  bool has_pertoken = false;
+  bool has_output_dtype = false;
+  for (const auto& arg : schema.arguments()) {
+    const auto& n = arg.name();
+    if (n == "x2_scale" || n == "dequant_scale") {
+      has_x2_scale = true;
+    } else if (n == "pertoken_scale") {
+      has_pertoken = true;
+    } else if (n == "output_dtype") {
+      has_output_dtype = true;
+    }
+  }
+  if (is_quant && !(has_x2_scale && has_pertoken && has_output_dtype)) {
+    LOG_FIRST_N(WARNING, 1)
+        << "[FlashComm1] npu_mm_reduce_scatter_base in this torch_npu build "
+           "does not expose the w8a8 scale arguments; falling back to unfused "
+           "quant reduce-scatter.";
+    return torch::Tensor();
+  }
+
+  std::vector<c10::IValue> stack;
+  stack.reserve(schema.arguments().size());
+  for (const auto& arg : schema.arguments()) {
+    const auto& n = arg.name();
+    if (n == "self" || n == "x1" || n == "input") {
+      stack.emplace_back(x1);
+    } else if (n == "x2") {
+      stack.emplace_back(x2);
+    } else if (n == "hcom" || n == "group" || n == "hccl_group") {
+      stack.emplace_back(hcom);
+    } else if (n == "world_size" || n == "rank_size") {
+      stack.emplace_back(world_size);
+    } else if (n == "reduce_op") {
+      stack.emplace_back(std::string("sum"));
+    } else if (n == "bias") {
+      stack.emplace_back(c10::IValue());
+    } else if (n == "comm_turn") {
+      stack.emplace_back(static_cast<int64_t>(0));
+    } else if (n == "x2_scale" || n == "dequant_scale") {
+      stack.emplace_back(x2_scale.has_value() ? c10::IValue(x2_scale.value())
+                                              : c10::IValue());
+    } else if (n == "pertoken_scale") {
+      stack.emplace_back(pertoken_scale.has_value()
+                             ? c10::IValue(pertoken_scale.value())
+                             : c10::IValue());
+    } else if (n == "output_dtype") {
+      stack.emplace_back(output_dtype.has_value()
+                             ? c10::IValue(output_dtype.value())
+                             : c10::IValue());
+    } else if (n == "comm_mode") {
+      stack.emplace_back(std::string("aiv"));
+    } else if (arg.default_value().has_value()) {
+      stack.emplace_back(arg.default_value().value());
+    } else {
+      // An unrecognized required argument: do not guess. Fall back.
+      LOG_FIRST_N(WARNING, 1)
+          << "[FlashComm1] npu_mm_reduce_scatter_base has an unexpected "
+             "required argument '"
+          << n << "'; falling back to unfused reduce-scatter.";
+      return torch::Tensor();
+    }
+  }
+
+  try {
+    handle->callBoxed(&stack);
+  } catch (const std::exception& e) {
+    LOG_FIRST_N(WARNING, 1)
+        << "[FlashComm1] npu_mm_reduce_scatter_base fused call failed: "
+        << e.what() << "; falling back to unfused reduce-scatter.";
+    return torch::Tensor();
+  }
+  if (stack.empty() || !stack[0].isTensor()) {
+    return torch::Tensor();
+  }
+  return stack[0].toTensor();
+}
+
+// Pad dim0 (token dim) up to a multiple of world_size with zeros. Fused
+// matmul + reduce-scatter requires the row dim divisible by world_size; the
+// padding rows are discarded later at the FlashComm1 all-gather/unpad boundary.
+torch::Tensor pad_rows_to_multiple(const torch::Tensor& x, int64_t world_size) {
+  const int64_t rows = x.size(0);
+  const int64_t remainder = rows % world_size;
+  if (remainder == 0) {
+    return x;
+  }
+  const int64_t pad = world_size - remainder;
+  std::vector<int64_t> pad_spec(static_cast<size_t>(2 * x.dim()), 0);
+  pad_spec[static_cast<size_t>(2 * (x.dim() - 1) + 1)] = pad;
+  return torch::nn::functional::pad(
+      x, torch::nn::functional::PadFuncOptions(pad_spec));
+}
+#endif  // USE_NPU
 
 }  // namespace
 
@@ -1407,6 +1541,84 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
                   ? std::optional<torch::Tensor>(bias_)
                   : std::nullopt;
   torch::Tensor output;
+#if defined(USE_NPU)
+  // FlashComm1: fused matmul + reduce-scatter tail. MMRS is deliberately
+  // independent from activation all-gather quantization so the lossless BF16
+  // fusion can be enabled and measured on its own.
+  {
+    const auto& fc1 = xllm::parallel_state::current_flash_comm1_context();
+    // Bias handling across a fused reduce-scatter is subtle (the bias must be
+    // added exactly once, post-scatter, on a single rank). To keep the fused
+    // path correct and the TP collective symmetric across ranks, only fuse when
+    // the layer has no bias. bias_.defined() is identical on every rank, so the
+    // decision stays uniform (unlike the rank-0-only `bias` optional above).
+    const bool has_bias = bias_.defined();
+    const bool fused_eligible = fc1.enabled && fc1.mmrs_enabled &&
+                                flash_comm1_eligible_ &&
+                                enable_result_reduction_ && world_size_ > 1 &&
+                                process_group_ != nullptr && !has_bias;
+    const bool is_unquant = weight_.defined() && weight_.is_floating_point() &&
+        quant_args_.quant_method() != kQuantMethodSmoothquant &&
+        quant_args_.quant_method() != kQuantMethodFp8 &&
+        !is_w8a8_quant(resolved_weight_quant_method_) &&
+        !is_w8a8_dynamic_quant(resolved_weight_quant_method_);
+    const bool is_w8a8_dyn =
+        is_w8a8_dynamic_quant(resolved_weight_quant_method_);
+    if (fused_eligible && (is_unquant || is_w8a8_dyn)) {
+      torch::Tensor fused_input = input;
+      if (!input_is_parallelized_) {
+        fused_input =
+            xllm::parallel_state::scatter(fused_input, process_group_);
+      }
+      const std::string hcom = process_group_->hccl_comm_name();
+      torch::Tensor fused;
+      if (!hcom.empty()) {
+        if (is_unquant) {
+          // x1 @ x2 with x2 = weight.T (matmul == linear == a @ b.T).
+          fused = try_npu_mm_reduce_scatter_base(
+              pad_rows_to_multiple(fused_input, world_size_),
+              weight_.t(),
+              hcom,
+              world_size_,
+              /*x2_scale=*/std::nullopt,
+              /*pertoken_scale=*/std::nullopt,
+              /*output_dtype=*/std::nullopt);
+        } else if (weight_scale_is_loaded_ && weight_scale_.defined()) {
+          // Per-token dynamic int8 quantization, then fused int8 GEMM +
+          // reduce-scatter. Padding rows are quantized as zero and discarded at
+          // the FlashComm1 unpad boundary.
+          xllm::kernel::NpuQuantizeParams quant_params;
+          quant_params.input = pad_rows_to_multiple(fused_input, world_size_);
+          auto [q_input, pertoken_scale] =
+              xllm::kernel::dynamic_quant(quant_params);
+          if (pertoken_scale.has_value() && pertoken_scale->defined()) {
+            fused = try_npu_mm_reduce_scatter_base(
+                q_input,
+                weight_.t(),
+                hcom,
+                world_size_,
+                /*x2_scale=*/weight_scale_,
+                pertoken_scale,
+                output_dtype_);
+          }
+        }
+      }
+      if (fused.defined()) {
+        LOG_FIRST_N(INFO, 1)
+            << "[FlashComm1] npu_mm_reduce_scatter_base fused path enabled: "
+            << (is_unquant ? "unquant" : "w8a8_dynamic")
+            << ", world_size=" << world_size_
+            << ", resolved_quant="
+            << (resolved_weight_quant_method_.has_value()
+                    ? resolved_weight_quant_method_.value()
+                    : "<none>")
+            << ", weight_dtype=" << weight_.scalar_type();
+        return fused;
+      }
+      // Fused path unavailable: fall through to the unfused path below.
+    }
+  }
+#endif  // USE_NPU
   if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
     CHECK(smooth_.defined()) << "smooth is required for smoothquant.";
     CHECK(qweight_.defined()) << "qweight is required for smoothquant.";
@@ -1516,7 +1728,19 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
     output = xllm::kernel::matmul(matmul_params);
   }
   if (enable_result_reduction_ && world_size_ > 1) {
-    output = xllm::parallel_state::reduce(output, process_group_);
+    const auto& fc1 = xllm::parallel_state::current_flash_comm1_context();
+    if (fc1.enabled && flash_comm1_eligible_) {
+      // FlashComm1: reduce-scatter(dim0) instead of all-reduce; keep uniform
+      // per-rank padding so the residual stream stays token-sharded until the
+      // sequence-parallel all-gather boundary.
+      //
+      // If MMRS is disabled or unavailable, run the numerically equivalent
+      // unfused matmul + reduce-scatter path.
+      output = xllm::parallel_state::reduce_scatter_padded_dim0(output,
+                                                                process_group_);
+    } else {
+      output = xllm::parallel_state::reduce(output, process_group_);
+    }
   }
   return output;
 }
