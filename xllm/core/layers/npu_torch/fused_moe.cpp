@@ -350,6 +350,40 @@ bool load_fused_down_scale_fallback(const StateDict& state_dict,
   return true;
 }
 
+bool can_reduce_scatter_moe_output_for_flashcomm1(
+    const ParallelArgs& parallel_args) {
+  const parallel_state::FlashComm1Context& context =
+      parallel_state::current_flash_comm1_context();
+  ProcessGroup* moe_tp_group = parallel_args.moe_tp_group_;
+  return context.enabled && parallel_args.dp_size() == 1 &&
+         moe_tp_group != nullptr &&
+         moe_tp_group->world_size() == context.tp_world_size &&
+         moe_tp_group->rank() == context.tp_rank;
+}
+
+torch::Tensor shard_moe_output_for_flashcomm1(
+    const torch::Tensor& output,
+    const ParallelArgs& parallel_args) {
+  const parallel_state::FlashComm1Context& context =
+      parallel_state::current_flash_comm1_context();
+  if (!context.enabled ||
+      can_reduce_scatter_moe_output_for_flashcomm1(parallel_args)) {
+    return output;
+  }
+
+  CHECK(output.defined());
+  CHECK_GT(output.dim(), 0);
+  CHECK_EQ(output.size(0), context.num_tokens)
+      << "FlashComm1 MoE must restore model-TP-local token ownership before "
+         "TP token sharding";
+  LOG_FIRST_N(INFO, 1)
+      << "[FlashComm1] topology-aware MoE fallback: finish the baseline MoE "
+         "reductions and DP slice, then locally shard the output across the "
+         "model TP group.";
+  return parallel_state::shard_dim0_padded(
+      output, context.tp_rank, context.tp_world_size);
+}
+
 }  // namespace
 
 FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
@@ -1084,15 +1118,17 @@ torch::Tensor FusedMoEImpl::forward_expert(
   // reshape the final hidden states to the original shape
   final_hidden_states = final_hidden_states.reshape(hidden_states_shape);
 
-  // FlashComm1: when active, the TP reduction is a padded reduce-scatter(dim0)
-  // so the residual stream stays token-sharded. The MoE input was already
-  // all-gathered to full tokens by the decoder layer, so the sum is identical
-  // to the baseline all-reduce; only the output token dim is sharded. The EP
-  // reduction is unaffected. When FlashComm1 is inactive this is a plain
-  // all-reduce (unchanged behavior).
-  auto tp_reduce = [](torch::Tensor tensor,
-                      ProcessGroup* pg) -> torch::Tensor {
-    if (parallel_state::flash_comm1_active()) {
+  // When DP=1 and the MoE TP group exactly matches the model TP group,
+  // FlashComm1 keeps the residual stream token-sharded by replacing the TP
+  // AllReduce with a padded ReduceScatter(dim0). Otherwise, finish the baseline
+  // MoE reductions first; the caller restores DP ownership and locally shards
+  // the output across the model TP group without mixing partition axes.
+  const bool use_flashcomm1_reduce_scatter =
+      can_reduce_scatter_moe_output_for_flashcomm1(parallel_args_);
+  auto tp_reduce = [use_flashcomm1_reduce_scatter](
+                       torch::Tensor tensor,
+                       ProcessGroup* pg) -> torch::Tensor {
+    if (use_flashcomm1_reduce_scatter) {
       return parallel_state::reduce_scatter_padded_dim0(tensor, pg);
     }
     return parallel_state::reduce(tensor, pg);
@@ -1166,7 +1202,7 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
     auto end = start + dp_tokens[dp_rank];
     output = output.slice(0, start, end);
   }
-  return output;
+  return shard_moe_output_for_flashcomm1(output, parallel_args_);
 }
 
 bool FusedMoEImpl::should_gather_dp_inputs_for_moe() const {
@@ -1627,7 +1663,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
     if (shared_output.has_value()) {
       output = output + shared_output.value();
     }
-    return output;
+    return shard_moe_output_for_flashcomm1(output, parallel_args_);
   }
 
   bool need_slice = false;
@@ -1688,7 +1724,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
     int64_t end = start + dp_tokens[dp_rank];
     output = output.slice(0, start, end);
   }
-  return output;
+  return shard_moe_output_for_flashcomm1(output, parallel_args_);
 }
 
 void FusedMoEImpl::load_e_score_correction_bias(const StateDict& state_dict) {

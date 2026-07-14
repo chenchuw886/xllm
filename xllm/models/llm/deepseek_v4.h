@@ -425,7 +425,6 @@ class DeepseekV4ModelImpl
     num_heads_ = model_args.n_heads();
     head_dim_ = model_args.o_lora_rank() + model_args.qk_rope_head_dim();
     tp_group_ = parallel_args.tp_group_;
-    dp_size_ = parallel_args.dp_size();
     dp_local_tp_size_ =
         std::max<int64_t>(parallel_args.world_size() /
                               std::max<int64_t>(parallel_args.dp_size(), 1),
@@ -697,8 +696,8 @@ class DeepseekV4ModelImpl
       normalize_graph_metadata_input_params(modified_input_params);
     }
     auto& dp_token_nums = modified_input_params.parallel.dp_global_token_nums;
-    // DP helper: keep zero entries at least 1 to avoid empty slices/padding
-    // in xllm DP utilities. DeepSeek V4 not use DP today.
+    // DP helper: keep zero entries at least 1 to avoid empty slices/padding in
+    // xLLM DP utilities. Empty graph ranks execute on their padded placeholder.
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
 
     if (!modified_input_params.attn_metadata) {
@@ -769,7 +768,6 @@ class DeepseekV4ModelImpl
     const bool fc1_tp_ok = fc1_parallel_cfg.enable_flashcomm1() &&
                            tp_group_ != nullptr &&
                            tp_group_->world_size() > 1 &&
-                           dp_size_ == 1 &&
                            fc1_num_tokens >= tp_group_->world_size();
     const bool fc1_enabled =
         fc1_tp_ok && (acl_graph_forward
@@ -780,12 +778,6 @@ class DeepseekV4ModelImpl
         tp_group_->world_size() <= 8;
     const bool fc1_quant_allgather_enabled =
         fc1_enabled && fc1_parallel_cfg.enable_flashcomm1_quant_allgather();
-    if (fc1_parallel_cfg.enable_flashcomm1() && dp_size_ > 1) {
-      LOG_FIRST_N(WARNING, 1)
-          << "[FlashComm1] disabled because DP+TP token ownership is not "
-             "supported yet: dp_size="
-          << dp_size_;
-    }
     if (fc1_enabled && fc1_parallel_cfg.enable_flashcomm1_mmrs() &&
         tp_group_->world_size() > 8) {
       LOG_FIRST_N(WARNING, 1)
@@ -1601,7 +1593,6 @@ class DeepseekV4ModelImpl
   int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
-  int64_t dp_size_ = 1;
   int64_t head_dim_ = 0;
   int64_t window_size_ = 128;
   int64_t index_n_heads_ = 0;

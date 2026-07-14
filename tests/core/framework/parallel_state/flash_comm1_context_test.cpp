@@ -16,6 +16,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include "core/framework/parallel_state/flash_comm1_context.h"
+#include "core/framework/parallel_state/parallel_state.h"
 
 namespace xllm {
 namespace parallel_state {
@@ -73,6 +74,24 @@ TEST(FlashComm1ContextTest, RestoresNestedContext) {
   EXPECT_TRUE(flash_comm1_active());
   EXPECT_FALSE(current_flash_comm1_context().mmrs_enabled);
   EXPECT_TRUE(current_flash_comm1_context().quant_allgather_enabled);
+}
+
+TEST(FlashComm1ContextTest, ShardsRestoredLocalDpTokensAcrossTpRanks) {
+  const torch::Tensor local_dp_tokens =
+      torch::arange(10, torch::TensorOptions().dtype(torch::kFloat32))
+          .reshape({10, 1});
+
+  const torch::Tensor middle_shard =
+      shard_dim0_padded(local_dp_tokens, /*rank=*/1, /*world_size=*/4);
+  const torch::Tensor expected_middle =
+      torch::tensor({3.0F, 4.0F, 5.0F}).reshape({3, 1});
+  EXPECT_TRUE(torch::equal(middle_shard, expected_middle));
+
+  const torch::Tensor boundary_shard =
+      shard_dim0_padded(local_dp_tokens, /*rank=*/3, /*world_size=*/4);
+  const torch::Tensor expected_boundary =
+      torch::tensor({9.0F, 0.0F, 0.0F}).reshape({3, 1});
+  EXPECT_TRUE(torch::equal(boundary_shard, expected_boundary));
 }
 
 }  // namespace test
