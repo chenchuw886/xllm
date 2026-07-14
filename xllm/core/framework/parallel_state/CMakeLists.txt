@@ -39,6 +39,7 @@ cc_library(
     dit_collective_communicator.cpp
   DEPS
     :common
+    :kernels
     torch
     $<$<BOOL:${USE_MLU}>:torch_mlu>
     $<$<BOOL:${USE_MUSA}>:torch_musa>
