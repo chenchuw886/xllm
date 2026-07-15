@@ -177,6 +177,7 @@ target_compile_definitions(tilelang_kernels PRIVATE
 target_link_libraries(tilelang_kernels
   PUBLIC
     "$ENV{NPU_HOME_PATH}/lib64/libascendc_runtime.a"
+    "$ENV{NPU_HOME_PATH}/lib64/libunified_dlog.so"
     "$ENV{NPU_HOME_PATH}/lib64/libtiling_api.a"
     "$ENV{NPU_HOME_PATH}/lib64/libascendcl.so"
     "$ENV{NPU_HOME_PATH}/lib64/libruntime.so"
