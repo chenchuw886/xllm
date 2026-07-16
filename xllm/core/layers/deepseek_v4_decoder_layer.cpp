@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
 
 namespace xllm {
@@ -143,10 +144,23 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   CHECK(attn_metadata.dsa_metadata)
       << "DeepseekV4DecoderLayer requires DSA metadata for DSAttention path.";
 
+  // FlashComm1 (sequence parallel): x arrives token-sharded across the TP
+  // group. hc_pre / norm run on the local shard; the full token dimension is
+  // restored right before attention so the DSA kernels and q/kv projections see
+  // all tokens. Attention's o_b_proj reduce-scatters the output back to a shard
+  // (see RowParallelLinearImpl::forward), so residual and attn output stay
+  // shard-aligned. A no-op when no FlashComm1 context is active.
+  const auto& fc1 = parallel_state::current_flash_comm1_context();
+
   auto residual_attn = x;
   auto [attn_input, post_attn, comb_attn] =
       hc_pre(x, hc_attn_fn_, hc_attn_scale_, hc_attn_base_);
   attn_input = std::get<0>(attn_norm_->forward(attn_input));
+
+  if (fc1.enabled) {
+    attn_input = parallel_state::all_gather_dim0_unpad(
+        attn_input, fc1.tp_group, fc1.num_tokens);
+  }
 
   auto& dsa = *(attn_metadata.dsa_metadata);
   const auto compress_metadata = std::make_tuple(
@@ -173,6 +187,14 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
       hc_pre(x, hc_ffn_fn_, hc_ffn_scale_, hc_ffn_base_);
   ffn_input = std::get<0>(ffn_norm_->forward(ffn_input));
 
+  // FlashComm1: restore full tokens before the gate + MoE. In M1 the gate runs
+  // on the full token set (baseline routing semantics, exactly reproducible);
+  // moving the gate onto the local shard is a later milestone (router-SP).
+  if (fc1.enabled) {
+    ffn_input = parallel_state::all_gather_dim0_unpad(
+        ffn_input, fc1.tp_group, fc1.num_tokens);
+  }
+
   auto ffn_input_2d = ffn_input.reshape({-1, ffn_input.size(-1)});
   std::optional<torch::Tensor> gate_input_ids = std::nullopt;
   if (input_ids.has_value() && input_ids.value().defined()) {
@@ -196,6 +218,27 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   auto [topk_weights, topk_ids] = gate_->forward(ffn_input_2d, gate_input_ids);
   ffn_input = moe_mlp_->forward_with_selected_experts(
       ffn_input, topk_weights, topk_ids, input_params);
+
+  // FlashComm1: MoE combine reduces over the MoE TP/EP groups and returns this
+  // DP replica's full tokens (expert parallelism shards experts, not the token
+  // dimension; DP>1 slices the MoE output back to T_dp inside the MoE). Shard
+  // the full-token output back to this rank so it stays aligned with the
+  // sharded residual stream before hc_post.
+  //
+  // Ownership guard (M1.7): every MoE path -- non-ep2 (DP gather + slice), ep2
+  // dispatch/combine, and shared-expert add -- must return fc1.num_tokens rows
+  // (this replica's T_dp), which is what we all-gathered ffn_input to above. If
+  // some path returns a different row count, sharding here would silently
+  // misalign the residual stream, so assert it explicitly instead.
+  if (fc1.enabled) {
+    const int64_t moe_rows = ffn_input.defined() ? ffn_input.size(0) : 0;
+    CHECK_EQ(moe_rows, fc1.num_tokens)
+        << "FlashComm1: MoE output must own this DP replica's full token count "
+           "before TP token sharding (expected "
+        << fc1.num_tokens << ", got " << moe_rows << ")";
+    ffn_input = parallel_state::shard_dim0_padded(
+        ffn_input, fc1.tp_rank, fc1.tp_world_size);
+  }
   x = hc_post(ffn_input, residual_ffn, post_ffn, comb_ffn);
 
   return x;
