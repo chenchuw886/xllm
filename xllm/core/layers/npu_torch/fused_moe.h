@@ -57,6 +57,20 @@ class FusedMoEImpl : public torch::nn::Module {
                         const ModelInputParams& input_params);
   void load_state_dict(const StateDict& state_dict);
 
+  // FlashComm1 MoE sequence-parallel (M4-MC2): true when this MoE will route
+  // through the EP2 MC2 dispatch/combine path for the given input. On that
+  // path token routing is per-row all-to-all (no DP all-gather, no TP token
+  // reduction), so the caller may feed a token shard directly instead of
+  // all-gathering to full tokens first -- which removes the redundant TP-wide
+  // replication of MoE compute. Only meaningful when a FlashComm1 context is
+  // active. Public wrapper over can_use_ep2_dispatch_combine so the decoder
+  // layer can decide whether to keep the residual sharded across the MoE.
+  bool will_use_ep2_dispatch_combine(
+      const ModelInputParams& input_params,
+      const torch::Tensor& hidden_states) const {
+    return can_use_ep2_dispatch_combine(input_params, hidden_states);
+  }
+
  private:
   // struct to store the selected expert info
   struct SelectedExpertInfo {

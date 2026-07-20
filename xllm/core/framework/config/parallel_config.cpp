@@ -92,6 +92,21 @@ DEFINE_bool(
     "padding to keep the group in sync. No effect when enable_flashcomm1 is "
     "false or when graph mode is disabled. Defaults to false (eager only).");
 
+DEFINE_bool(
+    enable_flashcomm1_moe_sp,
+    false,
+    "Whether to keep the residual stream token-sharded across the MoE on the "
+    "EP2 MC2 dispatch/combine path (M4-MC2). When false (default) the layer "
+    "all-gathers to full tokens before the gate + MoE (the M1 topology, which "
+    "on the MC2 path replicates MoE compute across the TP group). When true "
+    "and the MoE will use MC2 dispatch/combine, the gate runs on the local "
+    "shard and the shard is fed directly into dispatch (all-to-all routes "
+    "per row), removing the pre-MoE all-gather, the post-MoE re-shard, and the "
+    "TP-wide MoE compute redundancy. Requires enable_flashcomm1. IMPORTANT: "
+    "feeding the closed dispatch/combine kernels unique per-rank shards is not "
+    "yet validated; verify numerical correctness on device before production "
+    "use. Defaults to false.");
+
 namespace xllm {
 
 void ParallelConfig::from_flags() {
@@ -111,6 +126,7 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dp_balance);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1_graph);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1_moe_sp);
 }
 
 void ParallelConfig::from_json(const JsonReader& json) {
@@ -129,6 +145,7 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dp_balance);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1_graph);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1_moe_sp);
 }
 
 void ParallelConfig::append_config_json(
@@ -159,6 +176,8 @@ void ParallelConfig::append_config_json(
       config_json, default_config, enable_flashcomm1);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_flashcomm1_graph);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flashcomm1_moe_sp);
 }
 
 ParallelConfig& ParallelConfig::get_instance() {

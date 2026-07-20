@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "framework/config/parallel_config.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
 
@@ -187,10 +188,26 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
       hc_pre(x, hc_ffn_fn_, hc_ffn_scale_, hc_ffn_base_);
   ffn_input = std::get<0>(ffn_norm_->forward(ffn_input));
 
-  // FlashComm1: restore full tokens before the gate + MoE. In M1 the gate runs
-  // on the full token set (baseline routing semantics, exactly reproducible);
-  // moving the gate onto the local shard is a later milestone (router-SP).
-  if (fc1.enabled) {
+  // FlashComm1 MoE boundary. Two topologies:
+  //
+  //  - M1 (default, moe_sp off): all-gather the shard back to this replica's
+  //    full T_dp tokens, run gate + MoE on full tokens (baseline routing
+  //    semantics), then shard the full output back. Correct for every MoE
+  //    path, but on the MC2 dispatch/combine path the TP ranks hold identical
+  //    tokens, so MoE compute is replicated tp_world_size times.
+  //
+  //  - M4-MC2 (moe_sp on AND the MoE will use MC2 dispatch/combine): keep the
+  //    residual sharded. The gate runs on the local shard, and the shard is
+  //    fed straight into dispatch -- all-to-all routes per row, so each rank
+  //    contributes only its unique T_dp/tp tokens and the tp_world_size-fold
+  //    replication is removed. No pre-MoE all-gather, no post-MoE re-shard.
+  //    combine returns the same row count it was given (the shard).
+  const bool moe_sp =
+      fc1.enabled &&
+      ParallelConfig::get_instance().enable_flashcomm1_moe_sp() &&
+      moe_mlp_->will_use_ep2_dispatch_combine(input_params, ffn_input);
+
+  if (fc1.enabled && !moe_sp) {
     ffn_input = parallel_state::all_gather_dim0_unpad(
         ffn_input, fc1.tp_group, fc1.num_tokens);
   }
@@ -200,6 +217,13 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   if (input_ids.has_value() && input_ids.value().defined()) {
     auto flat_input_ids =
         input_ids.value().reshape({-1}).to(ffn_input.device());
+    // M4-MC2: the gate runs on the local shard, so the routing input_ids must
+    // be sharded the same way (same tp_group / rank / padding) as the hidden
+    // stream to stay row-aligned with ffn_input_2d.
+    if (moe_sp && flat_input_ids.size(0) == fc1.num_tokens) {
+      flat_input_ids = parallel_state::shard_dim0_padded(
+          flat_input_ids, fc1.tp_rank, fc1.tp_world_size);
+    }
     const int64_t token_count = flat_input_ids.size(0);
     const int64_t hidden_rows = ffn_input_2d.size(0);
     if (token_count == hidden_rows) {
@@ -219,25 +243,29 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   ffn_input = moe_mlp_->forward_with_selected_experts(
       ffn_input, topk_weights, topk_ids, input_params);
 
-  // FlashComm1: MoE combine reduces over the MoE TP/EP groups and returns this
-  // DP replica's full tokens (expert parallelism shards experts, not the token
-  // dimension; DP>1 slices the MoE output back to T_dp inside the MoE). Shard
-  // the full-token output back to this rank so it stays aligned with the
-  // sharded residual stream before hc_post.
-  //
-  // Ownership guard (M1.7): every MoE path -- non-ep2 (DP gather + slice), ep2
-  // dispatch/combine, and shared-expert add -- must return fc1.num_tokens rows
-  // (this replica's T_dp), which is what we all-gathered ffn_input to above. If
-  // some path returns a different row count, sharding here would silently
-  // misalign the residual stream, so assert it explicitly instead.
   if (fc1.enabled) {
     const int64_t moe_rows = ffn_input.defined() ? ffn_input.size(0) : 0;
-    CHECK_EQ(moe_rows, fc1.num_tokens)
-        << "FlashComm1: MoE output must own this DP replica's full token count "
-           "before TP token sharding (expected "
-        << fc1.num_tokens << ", got " << moe_rows << ")";
-    ffn_input = parallel_state::shard_dim0_padded(
-        ffn_input, fc1.tp_rank, fc1.tp_world_size);
+    if (moe_sp) {
+      // MC2 dispatch/combine returns the same rows it was given: the padded
+      // shard (ceil(num_tokens / tp_world_size)). It is already aligned with
+      // the sharded residual stream, so no re-shard is needed. Assert the shard
+      // row count as a guard.
+      const int64_t chunk =
+          (fc1.num_tokens + fc1.tp_world_size - 1) / fc1.tp_world_size;
+      CHECK_EQ(moe_rows, chunk)
+          << "FlashComm1 MoE-SP: dispatch/combine must return this rank's token "
+             "shard (expected "
+          << chunk << ", got " << moe_rows << ")";
+    } else {
+      // M1: MoE returns this DP replica's full T_dp tokens; shard back so it
+      // stays aligned with the sharded residual before hc_post.
+      CHECK_EQ(moe_rows, fc1.num_tokens)
+          << "FlashComm1: MoE output must own this DP replica's full token "
+             "count before TP token sharding (expected "
+          << fc1.num_tokens << ", got " << moe_rows << ")";
+      ffn_input = parallel_state::shard_dim0_padded(
+          ffn_input, fc1.tp_rank, fc1.tp_world_size);
+    }
   }
   x = hc_post(ffn_input, residual_ffn, post_ffn, comb_ffn);
 

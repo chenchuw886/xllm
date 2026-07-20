@@ -55,7 +55,8 @@ class ParallelConfig final {
          "micro_batch_num",
          "enable_dp_balance",
          "enable_flashcomm1",
-         "enable_flashcomm1_graph"}};
+         "enable_flashcomm1_graph",
+         "enable_flashcomm1_moe_sp"}};
     return kOptionCategory;
   }
 
@@ -96,6 +97,12 @@ class ParallelConfig final {
   // Keep FlashComm1 active inside ACL graph (decode) forwards. Requires
   // enable_flashcomm1. Defaults to false = eager path only.
   PROPERTY(bool, enable_flashcomm1_graph) = false;
+
+  // Keep the residual sharded across the MoE on the MC2 dispatch/combine path
+  // (M4-MC2): gate on the shard, dispatch the shard directly, no pre-MoE
+  // all-gather or post-MoE re-shard. Removes TP-wide MoE compute redundancy.
+  // Requires enable_flashcomm1. Defaults to false (= M1 gather-before-MoE).
+  PROPERTY(bool, enable_flashcomm1_moe_sp) = false;
 
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
     return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;

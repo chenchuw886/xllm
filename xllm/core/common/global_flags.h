@@ -140,6 +140,8 @@ DECLARE_bool(enable_flashcomm1);
 
 DECLARE_bool(enable_flashcomm1_graph);
 
+DECLARE_bool(enable_flashcomm1_moe_sp);
+
 constexpr int32_t kGraphExecutorLogVerboseLevel = 50;
 
 DECLARE_bool(enable_graph);
