@@ -283,6 +283,19 @@ class RowParallelLinearImpl : public torch::nn::Module {
   ProcessGroup* process_group() const { return process_group_; }
 
  private:
+#if defined(USE_NPU)
+  // P0/MC2: whether the fused Matmul + AllReduce path is usable for this layer.
+  // Resolved once on first forward from the flag, world_size, reduction setting
+  // and runtime op availability.
+  bool use_matmul_allreduce();
+
+  // P0/MC2: run the fused Matmul + AllReduce (npu_mm_all_reduce_base) in place
+  // of matmul + all_reduce for the BF16/FP16 row-parallel path.
+  torch::Tensor forward_matmul_allreduce(
+      const torch::Tensor& input,
+      const std::optional<torch::Tensor>& bias);
+#endif
+
   // parameter members, must be registered
   // we allocate the transpose since linear performs XA^T.
   // A^T: [out_features, in_features_per_partition]
@@ -325,6 +338,12 @@ class RowParallelLinearImpl : public torch::nn::Module {
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
   std::optional<std::string> resolved_weight_quant_method_;
+
+  // P0/MC2 fused Matmul + AllReduce state (NPU only). Resolved lazily on the
+  // first forward: hccl_comm_name() may initialize the communicator, so it is
+  // cached, and the usability decision is cached alongside it.
+  std::optional<bool> use_matmul_allreduce_;
+  std::optional<std::string> mm_all_reduce_comm_name_;
 };
 TORCH_MODULE(RowParallelLinear);
 

@@ -453,6 +453,29 @@ torch::Tensor quant_matmul(QuantMatmulParams& params) {
 #endif
 }
 
+torch::Tensor mm_all_reduce(MmAllReduceParams& params) {
+#if defined(USE_NPU)
+  return npu::mm_all_reduce(params.x1,
+                            params.x2,
+                            params.hcom,
+                            params.reduce_op,
+                            params.bias,
+                            params.dequant_scale,
+                            params.pertoken_scale,
+                            params.comm_turn);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
+bool has_mm_all_reduce() {
+#if defined(USE_NPU)
+  return npu::has_mm_all_reduce();
+#else
+  return false;
+#endif
+}
+
 torch::Tensor quantize(NpuQuantizeParams& params) {
 #if defined(USE_NPU)
   CHECK(params.scale.has_value() && params.scale->defined())

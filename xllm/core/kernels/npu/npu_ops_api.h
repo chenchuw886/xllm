@@ -89,6 +89,22 @@ torch::Tensor matmul(const torch::Tensor& a,
                      const torch::Tensor& b,
                      const std::optional<torch::Tensor>& bias);
 
+// Fused Matmul + AllReduce (Ascend MC2). Computes all_reduce(x1 @ x2 + bias)
+// with the tensor-parallel collective pipelined inside the matmul. The int8
+// path is enabled by passing dequant_scale (and pertoken_scale for the dynamic
+// case); leave them empty for the BF16/FP16 path.
+torch::Tensor mm_all_reduce(const torch::Tensor& x1,
+                            const torch::Tensor& x2,
+                            const std::string& hcom,
+                            const std::string& reduce_op,
+                            const c10::optional<torch::Tensor>& bias,
+                            const c10::optional<torch::Tensor>& dequant_scale,
+                            const c10::optional<torch::Tensor>& pertoken_scale,
+                            int64_t comm_turn);
+
+// Whether the fused npu_mm_all_reduce_base operator is available in libopapi.
+bool has_mm_all_reduce();
+
 torch::Tensor active(const torch::Tensor& input, const std::string& act_mode);
 
 torch::Tensor rms_norm(const torch::Tensor& input,

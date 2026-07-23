@@ -51,6 +51,13 @@ torch::Tensor matmul(MatmulParams& params);
 
 torch::Tensor quant_matmul(QuantMatmulParams& params);
 
+// Fused Matmul + AllReduce (Ascend MC2). Overlaps the tensor-parallel
+// all-reduce with the matmul. NPU only.
+torch::Tensor mm_all_reduce(MmAllReduceParams& params);
+
+// Whether the fused Matmul + AllReduce operator is available in the backend.
+bool has_mm_all_reduce();
+
 torch::Tensor quantize(NpuQuantizeParams& params);
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>> dynamic_quant(

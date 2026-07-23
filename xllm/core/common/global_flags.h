@@ -119,6 +119,8 @@ DECLARE_bool(enable_multi_stream_parallel);
 
 DECLARE_int32(micro_batch_num);
 
+DECLARE_bool(enable_matmul_allreduce);
+
 DECLARE_bool(enable_dp_balance);
 
 // --- ep load balance config ---

@@ -19,6 +19,7 @@ cc_library(
     npu_causal_conv1d.cpp
     npu_fused_infer_attention.cpp
     npu_gemma_rms_norm.cpp
+    npu_mm_all_reduce.cpp
     npu_block_sparse_attention.cpp
     npu_rain_fusion_attention.cpp
     npu_grouped_matmul.cpp

@@ -64,6 +64,14 @@ DEFINE_int32(micro_batch_num,
              "Default use two micro batches for multi-stream parallel.");
 
 DEFINE_bool(
+    enable_matmul_allreduce,
+    false,
+    "Enable the Ascend MC2 fused Matmul + AllReduce operator for row-parallel "
+    "tails, overlapping the tensor-parallel all-reduce with the matmul. NPU "
+    "only; currently wired for the BF16/FP16 path and falls back to "
+    "matmul + all_reduce when unavailable.");
+
+DEFINE_bool(
     enable_dp_balance,
     false,
     "Whether to enable dp load balance, if true, sequences within a single "
@@ -84,6 +92,7 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mm_encoder_dp);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_multi_stream_parallel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(micro_batch_num);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_matmul_allreduce);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dp_balance);
 }
 
@@ -99,6 +108,7 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mm_encoder_dp);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_multi_stream_parallel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(micro_batch_num);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_matmul_allreduce);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dp_balance);
 }
 
@@ -122,6 +132,8 @@ void ParallelConfig::append_config_json(
       config_json, default_config, enable_multi_stream_parallel);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, micro_batch_num);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_matmul_allreduce);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_dp_balance);
 }

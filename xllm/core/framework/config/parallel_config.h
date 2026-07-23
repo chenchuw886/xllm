@@ -52,6 +52,7 @@ class ParallelConfig final {
          "enable_mm_encoder_dp",
          "enable_multi_stream_parallel",
          "micro_batch_num",
+         "enable_matmul_allreduce",
          "enable_dp_balance"}};
     return kOptionCategory;
   }
@@ -80,6 +81,12 @@ class ParallelConfig final {
   PROPERTY(bool, enable_multi_stream_parallel) = false;
 
   PROPERTY(int32_t, micro_batch_num) = 1;
+
+  // Ascend MC2 fused Matmul + AllReduce for row-parallel tails. When true and
+  // tp>1, eligible BF16/FP16 row-parallel layers replace matmul + all_reduce
+  // with npu_mm_all_reduce_base so the collective overlaps the matmul. NPU
+  // only; falls back to matmul + all_reduce when the op is unavailable.
+  PROPERTY(bool, enable_matmul_allreduce) = false;
 
   PROPERTY(bool, enable_dp_balance) = false;
 

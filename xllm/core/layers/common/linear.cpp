@@ -26,6 +26,8 @@ limitations under the License.
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
 
+#include "core/common/global_flags.h"
+
 namespace xllm {
 namespace layer {
 
@@ -1468,6 +1470,14 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
     if (!input_is_parallelized_) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
+#if defined(USE_NPU)
+    // P0/MC2: fuse the row-parallel matmul with its tensor-parallel all-reduce
+    // so the collective overlaps the matmul. Only the BF16/FP16 path (this
+    // branch) is wired; returns early because the fused op already reduces.
+    if (use_matmul_allreduce()) {
+      return forward_matmul_allreduce(input, bias);
+    }
+#endif
     xllm::kernel::MatmulParams matmul_params;
     matmul_params.a = input;
     matmul_params.b = weight_;
@@ -1479,6 +1489,40 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
   }
   return output;
 }
+
+#if defined(USE_NPU)
+bool RowParallelLinearImpl::use_matmul_allreduce() {
+  if (!use_matmul_allreduce_.has_value()) {
+    const bool requested = FLAGS_enable_matmul_allreduce &&
+                           enable_result_reduction_ && world_size_ > 1;
+    const bool available = requested && xllm::kernel::has_mm_all_reduce();
+    if (requested && !available) {
+      LOG(WARNING) << "enable_matmul_allreduce is set but the fused "
+                      "npu_mm_all_reduce_base operator is unavailable; falling "
+                      "back to matmul + all_reduce.";
+    }
+    use_matmul_allreduce_ = available;
+  }
+  return use_matmul_allreduce_.value();
+}
+
+torch::Tensor RowParallelLinearImpl::forward_matmul_allreduce(
+    const torch::Tensor& input,
+    const std::optional<torch::Tensor>& bias) {
+  if (!mm_all_reduce_comm_name_.has_value()) {
+    mm_all_reduce_comm_name_ = process_group_->hccl_comm_name();
+  }
+  xllm::kernel::MmAllReduceParams params;
+  params.x1 = input;
+  // The stored weight is [out_features, in_features] = [N, K]; the fused op
+  // computes x1 @ x2 with x2 laid out as [K, N].
+  params.x2 = weight_.transpose(0, 1);
+  params.hcom = mm_all_reduce_comm_name_.value();
+  params.reduce_op = "sum";
+  params.bias = bias;
+  return xllm::kernel::mm_all_reduce(params);
+}
+#endif
 
 // load the weight from the checkpoint
 void RowParallelLinearImpl::load_state_dict(const StateDict& state_dict) {

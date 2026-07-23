@@ -355,6 +355,29 @@ struct QuantMatmulParams {
   std::optional<at::ScalarType> output_dtype;
 };
 
+// Fused Matmul + AllReduce (Ascend MC2) parameters. Computes
+// all_reduce(x1 @ x2 + bias) with the tensor-parallel collective pipelined
+// inside the matmul so the communication overlaps the compute.
+struct MmAllReduceParams {
+  // Activation tensor [M, K]. int8 for the quantized path, BF16/FP16 otherwise.
+  torch::Tensor x1;
+  // Weight laid out as [K, N]. The stored RowParallel weight is [N, K], so the
+  // caller passes weight.transpose(0, 1).
+  torch::Tensor x2;
+  // HCCL communication domain name of the tensor-parallel group.
+  std::string hcom;
+  // Collective reduce op; "sum" for a tensor-parallel all-reduce.
+  std::string reduce_op = "sum";
+  // Optional bias, added to the local matmul before the reduction.
+  std::optional<torch::Tensor> bias;
+  // Optional weight dequant scale for the int8 path (unused for BF16/FP16).
+  std::optional<torch::Tensor> dequant_scale;
+  // Optional per-token activation scale for the dynamic int8 path.
+  std::optional<torch::Tensor> pertoken_scale;
+  // Number of communication turns (0 = backend default).
+  int64_t comm_turn = 0;
+};
+
 struct NpuQuantizeParams {
   // Input activation tensor.
   torch::Tensor input;
