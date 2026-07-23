@@ -289,10 +289,27 @@ class RowParallelLinearImpl : public torch::nn::Module {
   // and runtime op availability.
   bool use_matmul_allreduce();
 
-  // P0/MC2: run the fused Matmul + AllReduce (npu_mm_all_reduce_base) in place
-  // of matmul + all_reduce for the BF16/FP16 row-parallel path.
-  torch::Tensor forward_matmul_allreduce(
+  // P0/MC2: shared launcher for the fused Matmul + AllReduce
+  // (npu_mm_all_reduce_base). Computes all_reduce(x1 @ weight^T (+ bias)). The
+  // int8 path is selected by dequant_scale (and pertoken_scale for the dynamic
+  // case); leave them empty for the BF16/FP16 path.
+  torch::Tensor run_matmul_allreduce(
+      const torch::Tensor& x1,
+      const std::optional<torch::Tensor>& bias,
+      const std::optional<torch::Tensor>& dequant_scale,
+      const std::optional<torch::Tensor>& pertoken_scale);
+
+  // P0/MC2: static W8A8 fused path. Quantizes the activation with the static
+  // input scale/offset, then runs the fused int8 Matmul + AllReduce.
+  torch::Tensor forward_w8a8_static_matmul_allreduce(
       const torch::Tensor& input,
+      const std::optional<torch::Tensor>& quant_bias);
+
+  // P0/MC2: dynamic W8A8 fused path. Per-token quantizes the activation, then
+  // runs the fused int8 Matmul + AllReduce with the per-token scale.
+  torch::Tensor forward_w8a8_dynamic_matmul_allreduce(
+      const torch::Tensor& input,
+      const torch::Tensor& weight_scale,
       const std::optional<torch::Tensor>& bias);
 #endif
 
