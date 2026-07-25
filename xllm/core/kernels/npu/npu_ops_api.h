@@ -105,6 +105,10 @@ torch::Tensor mm_all_reduce(const torch::Tensor& x1,
 // Whether the fused npu_mm_all_reduce_base operator is available in libopapi.
 bool has_mm_all_reduce();
 
+// Cast a weight tensor to FRACTAL_NZ format, required by the fused
+// MatmulAllReduce on some SoCs (e.g. Ascend 910_93).
+torch::Tensor to_fractal_nz(const torch::Tensor& tensor);
+
 torch::Tensor active(const torch::Tensor& input, const std::string& act_mode);
 
 torch::Tensor rms_norm(const torch::Tensor& input,

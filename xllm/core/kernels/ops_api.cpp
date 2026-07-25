@@ -476,6 +476,14 @@ bool has_mm_all_reduce() {
 #endif
 }
 
+torch::Tensor to_fractal_nz(const torch::Tensor& tensor) {
+#if defined(USE_NPU)
+  return npu::to_fractal_nz(tensor);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
 torch::Tensor quantize(NpuQuantizeParams& params) {
 #if defined(USE_NPU)
   CHECK(params.scale.has_value() && params.scale->defined())

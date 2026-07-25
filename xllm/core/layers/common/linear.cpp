@@ -1446,7 +1446,9 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
 #if defined(USE_NPU)
     // P0/MC2: fuse the int8 matmul with its tensor-parallel all-reduce.
     if (use_matmul_allreduce()) {
-      return forward_w8a8_static_matmul_allreduce(input, quant_bias);
+      if (auto fused = forward_w8a8_static_matmul_allreduce(input, quant_bias)) {
+        return *fused;
+      }
     }
 #endif
     output = npu_w8a8_linear_forward(input,
@@ -1471,8 +1473,10 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
 #elif defined(USE_NPU)
     // P0/MC2: fuse the int8 matmul with its tensor-parallel all-reduce.
     if (use_matmul_allreduce()) {
-      return forward_w8a8_dynamic_matmul_allreduce(
-          input, weight_scale.value(), bias);
+      if (auto fused = forward_w8a8_dynamic_matmul_allreduce(
+              input, weight_scale.value(), bias)) {
+        return *fused;
+      }
     }
     output = npu_w8a8_dynamic_linear_forward(
         input, weight_, weight_scale.value(), bias, output_dtype_);
@@ -1486,9 +1490,11 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
     // so the collective overlaps the matmul. Returns early because the fused
     // op already reduces across the tensor-parallel group.
     if (use_matmul_allreduce()) {
-      return run_matmul_allreduce(
-          input, bias, /*dequant_scale=*/std::nullopt,
-          /*pertoken_scale=*/std::nullopt);
+      if (auto fused = run_matmul_allreduce(
+              input, bias, /*dequant_scale=*/std::nullopt,
+              /*pertoken_scale=*/std::nullopt)) {
+        return *fused;
+      }
     }
 #endif
     xllm::kernel::MatmulParams matmul_params;
@@ -1519,30 +1525,55 @@ bool RowParallelLinearImpl::use_matmul_allreduce() {
   return use_matmul_allreduce_.value();
 }
 
-torch::Tensor RowParallelLinearImpl::run_matmul_allreduce(
+std::optional<torch::Tensor> RowParallelLinearImpl::run_matmul_allreduce(
     const torch::Tensor& x1,
     const std::optional<torch::Tensor>& bias,
     const std::optional<torch::Tensor>& dequant_scale,
     const std::optional<torch::Tensor>& pertoken_scale) {
+  if (matmul_allreduce_disabled_) {
+    return std::nullopt;
+  }
   if (!mm_all_reduce_comm_name_.has_value()) {
     mm_all_reduce_comm_name_ = process_group_->hccl_comm_name();
   }
   xllm::kernel::MmAllReduceParams params;
   params.x1 = x1;
-  // The stored weight is [out_features, in_features] = [N, K]; the fused op
-  // computes x1 @ x2 with x2 laid out as [K, N].
-  params.x2 = weight_.transpose(0, 1);
   params.hcom = mm_all_reduce_comm_name_.value();
   params.reduce_op = "sum";
   params.bias = bias;
   params.dequant_scale = dequant_scale;
   params.pertoken_scale = pertoken_scale;
-  return xllm::kernel::mm_all_reduce(params);
+  // A resolvable op symbol does not guarantee the SoC has the operator binary
+  // (e.g. MatmulAllReduce is absent on some Ascend 910_93 / CANN combinations),
+  // and the failure is a synchronous host-side launch error. Catch it, disable
+  // the fused path for this layer, and fall back to matmul + all_reduce.
+  try {
+    if (!mm_all_reduce_weight_nz_.defined()) {
+      // The stored weight is [out_features, in_features] = [N, K]; the fused op
+      // computes x1 @ x2 with x2 laid out as [K, N]. Cast to FRACTAL_NZ because
+      // some SoCs (e.g. Ascend 910_93) only register the NZ-weight variant.
+      mm_all_reduce_weight_nz_ =
+          xllm::kernel::to_fractal_nz(weight_.transpose(0, 1));
+    }
+    params.x2 = mm_all_reduce_weight_nz_;
+    return xllm::kernel::mm_all_reduce(params);
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "npu_mm_all_reduce_base failed ('" << e.what()
+                 << "'); disabling the fused Matmul + AllReduce for this layer "
+                    "and falling back to matmul + all_reduce.";
+    matmul_allreduce_disabled_ = true;
+    mm_all_reduce_weight_nz_ = torch::Tensor();
+    return std::nullopt;
+  }
 }
 
-torch::Tensor RowParallelLinearImpl::forward_w8a8_static_matmul_allreduce(
+std::optional<torch::Tensor>
+RowParallelLinearImpl::forward_w8a8_static_matmul_allreduce(
     const torch::Tensor& input,
     const std::optional<torch::Tensor>& quant_bias) {
+  if (matmul_allreduce_disabled_) {
+    return std::nullopt;
+  }
   // Static per-tensor/per-channel activation quantization, mirroring
   // npu_w8a8_linear_forward, then the fused int8 Matmul + AllReduce with the
   // weight dequant scale.
@@ -1558,10 +1589,14 @@ torch::Tensor RowParallelLinearImpl::forward_w8a8_static_matmul_allreduce(
                               /*pertoken_scale=*/std::nullopt);
 }
 
-torch::Tensor RowParallelLinearImpl::forward_w8a8_dynamic_matmul_allreduce(
+std::optional<torch::Tensor>
+RowParallelLinearImpl::forward_w8a8_dynamic_matmul_allreduce(
     const torch::Tensor& input,
     const torch::Tensor& weight_scale,
     const std::optional<torch::Tensor>& bias) {
+  if (matmul_allreduce_disabled_) {
+    return std::nullopt;
+  }
   // Per-token dynamic activation quantization, mirroring
   // npu_w8a8_dynamic_linear_forward, then the fused int8 Matmul + AllReduce
   // with the weight scale and per-token activation scale.

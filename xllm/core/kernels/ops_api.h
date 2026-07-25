@@ -58,6 +58,10 @@ torch::Tensor mm_all_reduce(MmAllReduceParams& params);
 // Whether the fused Matmul + AllReduce operator is available in the backend.
 bool has_mm_all_reduce();
 
+// Cast a weight tensor to FRACTAL_NZ format for the fused Matmul + AllReduce.
+// NPU only.
+torch::Tensor to_fractal_nz(const torch::Tensor& tensor);
+
 torch::Tensor quantize(NpuQuantizeParams& params);
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>> dynamic_quant(

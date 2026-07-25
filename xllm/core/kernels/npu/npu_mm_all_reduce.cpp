@@ -20,7 +20,29 @@ limitations under the License.
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "npu_ops_api.h"
 
+#ifdef TORCH_HIGHER_THAN_PTA6
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
+#else
+#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
+#endif
+
 namespace xllm::kernel::npu {
+
+// ACL FRACTAL_NZ format enum value. The fused MatmulAllReduce requires the
+// weight in FRACTAL_NZ on some SoCs (e.g. Ascend 910_93): the ND-weight opType
+// is not registered there, so an ND weight triggers
+// "socVersion does not support opType [MatmulAllReduce]".
+constexpr int64_t kAclFormatFractalNz = 29;
+
+torch::Tensor to_fractal_nz(const torch::Tensor& tensor) {
+  auto contiguous = tensor.contiguous();
+#ifdef TORCH_HIGHER_THAN_PTA6
+  return at_npu::native::npu_format_cast(contiguous, kAclFormatFractalNz);
+#else
+  return at_npu::native::NPUNativeFunctions::npu_format_cast(contiguous,
+                                                             kAclFormatFractalNz);
+#endif
+}
 
 bool has_mm_all_reduce() {
   // torch_npu's npu_mm_all_reduce_base has dispatched to a few different aclnn

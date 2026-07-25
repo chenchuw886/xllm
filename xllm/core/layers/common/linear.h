@@ -286,28 +286,35 @@ class RowParallelLinearImpl : public torch::nn::Module {
 #if defined(USE_NPU)
   // P0/MC2: whether the fused Matmul + AllReduce path is usable for this layer.
   // Resolved once on first forward from the flag, world_size, reduction setting
-  // and runtime op availability.
+  // and runtime op availability. Note that op availability can only be fully
+  // determined at call time (a resolvable symbol does not guarantee the SoC has
+  // the operator binary), so run_matmul_allreduce() also catches a launch
+  // failure and permanently falls back.
   bool use_matmul_allreduce();
 
   // P0/MC2: shared launcher for the fused Matmul + AllReduce
   // (npu_mm_all_reduce_base). Computes all_reduce(x1 @ weight^T (+ bias)). The
   // int8 path is selected by dequant_scale (and pertoken_scale for the dynamic
-  // case); leave them empty for the BF16/FP16 path.
-  torch::Tensor run_matmul_allreduce(
+  // case); leave them empty for the BF16/FP16 path. Returns std::nullopt when
+  // the fused op is disabled or fails at launch, so the caller falls back to
+  // the standard matmul + all_reduce path.
+  std::optional<torch::Tensor> run_matmul_allreduce(
       const torch::Tensor& x1,
       const std::optional<torch::Tensor>& bias,
       const std::optional<torch::Tensor>& dequant_scale,
       const std::optional<torch::Tensor>& pertoken_scale);
 
   // P0/MC2: static W8A8 fused path. Quantizes the activation with the static
-  // input scale/offset, then runs the fused int8 Matmul + AllReduce.
-  torch::Tensor forward_w8a8_static_matmul_allreduce(
+  // input scale/offset, then runs the fused int8 Matmul + AllReduce. Returns
+  // std::nullopt on fallback.
+  std::optional<torch::Tensor> forward_w8a8_static_matmul_allreduce(
       const torch::Tensor& input,
       const std::optional<torch::Tensor>& quant_bias);
 
   // P0/MC2: dynamic W8A8 fused path. Per-token quantizes the activation, then
-  // runs the fused int8 Matmul + AllReduce with the per-token scale.
-  torch::Tensor forward_w8a8_dynamic_matmul_allreduce(
+  // runs the fused int8 Matmul + AllReduce with the per-token scale. Returns
+  // std::nullopt on fallback.
+  std::optional<torch::Tensor> forward_w8a8_dynamic_matmul_allreduce(
       const torch::Tensor& input,
       const torch::Tensor& weight_scale,
       const std::optional<torch::Tensor>& bias);
@@ -361,6 +368,12 @@ class RowParallelLinearImpl : public torch::nn::Module {
   // cached, and the usability decision is cached alongside it.
   std::optional<bool> use_matmul_allreduce_;
   std::optional<std::string> mm_all_reduce_comm_name_;
+  // Cached [K, N] weight in FRACTAL_NZ format for the fused op (some SoCs, e.g.
+  // Ascend 910_93, only register the NZ-weight MatmulAllReduce variant).
+  torch::Tensor mm_all_reduce_weight_nz_;
+  // Set when the fused op fails at launch (e.g. the SoC lacks the operator
+  // binary); permanently disables the fused path for this layer.
+  bool matmul_allreduce_disabled_ = false;
 };
 TORCH_MODULE(RowParallelLinear);
 
