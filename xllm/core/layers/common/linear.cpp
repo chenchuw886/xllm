@@ -1547,15 +1547,25 @@ std::optional<torch::Tensor> RowParallelLinearImpl::run_matmul_allreduce(
   // (e.g. MatmulAllReduce is absent on some Ascend 910_93 / CANN combinations),
   // and the failure is a synchronous host-side launch error. Catch it, disable
   // the fused path for this layer, and fall back to matmul + all_reduce.
+  //
+  // The stored weight is [out_features, in_features] = [N, K]; the fused op
+  // computes x1 @ x2 with x2 laid out as [K, N]. The required weight format
+  // differs by quant mode on Ascend 910_93:
+  //   - quantized (int8) path: requires FRACTAL_NZ (the ND-weight variant is
+  //     not registered -> "opType [MatmulAllReduce] not supported");
+  //   - non-quant (BF16/FP16) path: requires ND ("non-quantization scenarios
+  //     unsupport weight NZ").
+  const bool is_quant = dequant_scale.has_value() && dequant_scale->defined();
   try {
-    if (!mm_all_reduce_weight_nz_.defined()) {
-      // The stored weight is [out_features, in_features] = [N, K]; the fused op
-      // computes x1 @ x2 with x2 laid out as [K, N]. Cast to FRACTAL_NZ because
-      // some SoCs (e.g. Ascend 910_93) only register the NZ-weight variant.
-      mm_all_reduce_weight_nz_ =
-          xllm::kernel::to_fractal_nz(weight_.transpose(0, 1));
+    if (is_quant) {
+      if (!mm_all_reduce_weight_nz_.defined()) {
+        mm_all_reduce_weight_nz_ =
+            xllm::kernel::to_fractal_nz(weight_.transpose(0, 1));
+      }
+      params.x2 = mm_all_reduce_weight_nz_;
+    } else {
+      params.x2 = weight_.transpose(0, 1);
     }
-    params.x2 = mm_all_reduce_weight_nz_;
     return xllm::kernel::mm_all_reduce(params);
   } catch (const std::exception& e) {
     LOG(WARNING) << "npu_mm_all_reduce_base failed ('" << e.what()
