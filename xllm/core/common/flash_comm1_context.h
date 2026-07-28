@@ -45,7 +45,7 @@ struct FlashComm1Context {
 
 struct FlashComm1Options {
   bool enable_flashcomm1 = false;
-  int32_t min_prefill_tokens = 1000;
+  int32_t min_prefill_tokens = 8192;
   bool enable_mmrs_fusion = false;
   std::string mmrs_comm_mode = "aiv";
 };
