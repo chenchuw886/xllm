@@ -59,7 +59,7 @@ DEFINE_bool(enable_flashcomm1,
             "Enable Flash Communication 1 sequence-parallel optimization.");
 
 DEFINE_int32(flashcomm1_min_prefill_tokens,
-             8192,
+             1000,
              "Minimum prefill token count to activate FC1.");
 
 DEFINE_bool(enable_mmrs_fusion,

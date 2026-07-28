@@ -74,7 +74,7 @@ class KernelConfig final {
 
   PROPERTY(bool, enable_flashcomm1) = false;
 
-  PROPERTY(int32_t, flashcomm1_min_prefill_tokens) = 8192;
+  PROPERTY(int32_t, flashcomm1_min_prefill_tokens) = 1000;
 
   PROPERTY(bool, enable_mmrs_fusion) = false;
 
