@@ -981,9 +981,9 @@ class DeepseekV4ModelImpl
                static_cast<int64_t>(capture_layer_to_index_.size()))
           << "DeepSeek-V4 captured aux hidden layer count mismatch.";
       const int64_t num_tokens = hidden_states.size(0);
-      return ModelOutput(hidden_states,
-                         residual_out,
-                         aux_output_buffer_.slice(0, 0, num_tokens));
+      ModelOutput out(hidden_states, residual_out);
+      out.aux_hidden_states = aux_output_buffer_.slice(0, 0, num_tokens);
+      return out;
     }
     if (pre_hc_head_hidden_states.defined()) {
       ModelOutput out(hidden_states, residual_out);
