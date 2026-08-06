@@ -179,6 +179,20 @@ int32_t calc_slot_id(int32_t position,
   return block_id * block_size + block_offset;
 }
 
+int32_t calc_ring_slot_id(int32_t position,
+                          const Slice<int32_t>& block_table_slice,
+                          int32_t block_size) {
+  CHECK_GT(block_size, 0) << "invalid block_size=" << block_size;
+  CHECK_GE(position, 0) << "invalid position=" << position;
+  CHECK(!block_table_slice.empty()) << "circular block table must not be empty";
+  const int32_t block_idx =
+      (position / block_size) % static_cast<int32_t>(block_table_slice.size());
+  const int32_t block_id = block_table_slice[block_idx];
+  CHECK_GE(block_id, 0) << "invalid circular block_id=" << block_id;
+  const int32_t block_offset = position % block_size;
+  return block_id * block_size + block_offset;
+}
+
 int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,
                     int32_t seq_id,
                     int32_t offset) {

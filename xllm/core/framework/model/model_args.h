@@ -69,6 +69,8 @@ struct ModelArgs {
   // DSpark: low-rank dim of the Markov head. 0 = disabled (plain DFlash /
   // non-DSpark models).
   PROPERTY(int64_t, markov_rank) = 0;
+  PROPERTY(int32_t, dspark_num_layers) = 0;
+  PROPERTY(int32_t, dspark_block_size) = 0;
 
   PROPERTY(bool, use_qk_norm) = false;
   PROPERTY(float, rms_norm_eps) = 0.0f;

@@ -442,6 +442,23 @@ TEST(SpecDecodeInputBuilderTest, CalcSlotIdOutOfRangeDeath) {
                "block table index out of range");
 }
 
+TEST(SpecDecodeInputBuilderTest, CalcRingSlotIdWrapsSlidingWindowBlocks) {
+  std::vector<int32_t> block_table = {7, 9};
+
+  EXPECT_EQ(calc_ring_slot_id(
+                /*position=*/0, to_slice(block_table), /*block_size=*/4),
+            28);
+  EXPECT_EQ(calc_ring_slot_id(
+                /*position=*/7, to_slice(block_table), /*block_size=*/4),
+            39);
+  EXPECT_EQ(calc_ring_slot_id(
+                /*position=*/8, to_slice(block_table), /*block_size=*/4),
+            28);
+  EXPECT_EQ(calc_ring_slot_id(
+                /*position=*/13, to_slice(block_table), /*block_size=*/4),
+            37);
+}
+
 TEST(DraftProbsBuilderTest, CompressForCacheDense) {
   auto draft_probs =
       torch::tensor({{0.1f, 0.2f, 0.7f}, {0.6f, 0.1f, 0.3f}}, torch::kFloat32);

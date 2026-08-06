@@ -68,6 +68,14 @@ class DSAttentionImpl : public torch::nn::Module {
           tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>&
               compress_metadata);
 
+  // Project captured target hidden states into this draft layer's shared-KV
+  // cache without running query attention or the FFN.
+  void write_context_kv(const torch::Tensor& hidden_states,
+                        const torch::Tensor& cos,
+                        const torch::Tensor& sin,
+                        const torch::Tensor& slot_mapping,
+                        KVCache& kv_cache);
+
   void load_state_dict(const StateDict& state_dict);
   int64_t non_registered_weight_bytes() const;
 
@@ -98,6 +106,7 @@ class DSAttentionImpl : public torch::nn::Module {
   int64_t index_n_heads_ = 0;
   int64_t index_head_dim_ = 0;
   int64_t index_topk_ = 0;
+  int64_t dspark_block_size_ = 0;
 
   double rope_theta_ = 10000.0;
   double compress_rope_theta_ = 40000.0;

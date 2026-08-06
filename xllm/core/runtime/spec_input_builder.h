@@ -121,6 +121,12 @@ int32_t calc_slot_id(int32_t position,
                      const Slice<int32_t>& block_table_slice,
                      int32_t block_size);
 
+// Computes one cache slot id from an absolute position and a circular block
+// table mapping, as used by DeepSeek-V4's sliding-window cache manager.
+int32_t calc_ring_slot_id(int32_t position,
+                          const Slice<int32_t>& block_table_slice,
+                          int32_t block_size);
+
 // Computes sequence kv length with platform-specific seq-lens layout handling.
 int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,
                     int32_t seq_id,

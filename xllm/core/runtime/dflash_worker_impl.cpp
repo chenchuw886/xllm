@@ -262,6 +262,19 @@ std::vector<int64_t> build_accepted_context_rows(
       row.append_token = false;
       row.append_kv_len = false;
       specBuilder::append_decode_row(row_ctx, row, block_size, buf);
+      if (row_ctx.model_managed_multiblock) {
+        CHECK(!row_ctx.multi_block_tables.empty())
+            << "DFlash composite cache is missing the SWA manager.";
+        CHECK_LT(static_cast<size_t>(seq_id),
+                 row_ctx.multi_block_tables.front().size());
+        const int32_t position =
+            row_ctx.positions[seq_id] + row.position_offset;
+        // DeepSeek-V4 exports SWA as manager 0. Composite row building uses a
+        // placeholder generic slot, so replace it with the circular SWA slot
+        // before scattering accepted target context into the draft cache.
+        buf.out_new_cache_slots.back() = specBuilder::calc_ring_slot_id(
+            position, row_ctx.multi_block_tables.front()[seq_id], block_size);
+      }
       accepted_idxes.emplace_back(row_offset + token_idx);
     }
   }
@@ -327,25 +340,30 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
   }
 
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
-    // Draft shares the target's lm_head and word embedding to save memory and a
-    // redundant matmul.
-    auto share_torch_head_and_embedding = [this]() {
+    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+    const bool uses_torch_head_and_embedding =
+        draft_args.model_type() == "deepseek_v4_dspark";
+    // Both checkpoint families share target embedding/head weights. Qwen's
+    // draft body is ATB-backed on NPU, whereas DeepSeek-V4 DSpark uses the
+    // torch-backed DSA model and therefore needs the common module interface.
+    if (uses_torch_head_and_embedding) {
       auto head = impl_->get_lm_head();
       draft_impl_->set_lm_head(head);
       auto word_embedding = impl_->get_word_embedding();
       draft_impl_->set_word_embedding(word_embedding);
-    };
+    } else {
 #if defined(USE_NPU)
-    // The DFlash draft body is registered ATB-only, so a TORCH-backend run
-    // aborts in create_llm_model before reaching here; the draft always uses
-    // the target's NPU (ATB) head and embedding.
-    auto head = impl_->get_npu_lm_head();
-    draft_impl_->set_npu_lm_head(head);
-    auto word_embedding = impl_->get_npu_word_embedding();
-    draft_impl_->set_npu_word_embedding(word_embedding);
+      auto head = impl_->get_npu_lm_head();
+      draft_impl_->set_npu_lm_head(head);
+      auto word_embedding = impl_->get_npu_word_embedding();
+      draft_impl_->set_npu_word_embedding(word_embedding);
 #else
-    share_torch_head_and_embedding();
+      auto head = impl_->get_lm_head();
+      draft_impl_->set_lm_head(head);
+      auto word_embedding = impl_->get_word_embedding();
+      draft_impl_->set_word_embedding(word_embedding);
 #endif
+    }
 
     JsonReader reader;
     const std::string config_path = model_weights_path + "/config.json";
@@ -356,12 +374,14 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     if (!mask_token_id.has_value()) {
       mask_token_id = reader.value<int32_t>("mask_token_id");
     }
+    if (!mask_token_id.has_value()) {
+      mask_token_id = reader.value<int32_t>("dspark_noise_token_id");
+    }
     CHECK(mask_token_id.has_value())
-        << "Block-diffusion draft config requires mask_token_id or "
-           "dflash_config.mask_token_id.";
+        << "Block-diffusion draft config requires mask_token_id, "
+           "dflash_config.mask_token_id, or dspark_noise_token_id.";
     mask_token_id_ = mask_token_id.value();
 
-    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
     const int64_t draft_vocab_size = draft_args.vocab_size();
     CHECK_GT(draft_vocab_size, 0)
         << "Block-diffusion draft vocab_size must be set.";
@@ -374,8 +394,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     const int64_t num_target_layers =
         static_cast<int64_t>(draft_args.layers_to_capture().size());
     CHECK_GT(num_target_layers, 0)
-        << "Block-diffusion draft config requires target_layer_ids or "
-           "dflash_config.target_layer_ids.";
+        << "Block-diffusion draft config requires dspark_target_layer_ids, "
+           "target_layer_ids, or dflash_config.target_layer_ids.";
     expected_context_hidden_size_ =
         static_cast<int64_t>(draft_args.hidden_size()) * num_target_layers;
   }
