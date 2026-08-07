@@ -334,10 +334,10 @@ void init_dsv4_counts(const ModelArgs& model_args,
   if (options.draft_model_args != nullptr) {
     CHECK(options.draft_options != nullptr)
         << "DSV4 draft options must be provided with draft model args";
-    CHECK(util::is_target_model_type(options.draft_model_args->model_type(),
-                                     /*target_type=*/"deepseek_v4",
-                                     /*match_mtp=*/true))
-        << "DSV4 MTP kv cache estimation only supports DeepSeek V4 draft";
+    CHECK(
+        util::is_deepseek_v4_model_type(options.draft_model_args->model_type()))
+        << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
+           "draft";
     const Dsv4KVCacheEstimateCost draft_cost = estimate_dsv4_kv_cache_cost(
         *options.draft_model_args, *options.draft_options);
     const int64_t constant_bytes =
@@ -498,12 +498,11 @@ KVCacheCapacity estimate_kv_cache_capacity(
   CHECK_GT(kv_cache_cap.cache_size_in_bytes(), 0)
       << "Available kv cache size must be greater than 0";
   const bool enable_dsv4_estimation =
-      util::is_target_model_type(model_args.model_type(),
-                                 /*target_type=*/"deepseek_v4",
-                                 /*match_mtp=*/true);
+      util::is_deepseek_v4_model_type(model_args.model_type());
   if (options.draft_model_args != nullptr) {
     CHECK(enable_dsv4_estimation)
-        << "DSV4 MTP kv cache estimation only supports DeepSeek V4 target";
+        << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
+           "target";
   }
 
   const int64_t dtype_size = static_cast<int64_t>(

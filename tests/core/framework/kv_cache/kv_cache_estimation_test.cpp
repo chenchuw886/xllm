@@ -328,6 +328,31 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
 #endif
 }
 
+TEST(KVCacheEstimationTest, EstimatesDeepSeekV4DSparkSwaPool) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4_dspark")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 1, 1});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 2818048;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.swa_count(), 19);
+  EXPECT_EQ(capacity.c4_count(), 0);
+  EXPECT_EQ(capacity.c128_count(), 0);
+  EXPECT_EQ(capacity.n_blocks(), 1);
+}
+
 TEST(KVCacheEstimationTest,
      SpeculativeDecodePreservesDeepSeekV4PoolBlockCount) {
   ModelArgs model_args;
