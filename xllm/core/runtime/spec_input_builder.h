@@ -127,6 +127,11 @@ int32_t calc_ring_slot_id(int32_t position,
                           const Slice<int32_t>& block_table_slice,
                           int32_t block_size);
 
+// Builds the sliding-window cache slots for every prefill query token in a
+// grouped-cache input. Manager 0 is the DeepSeek-V4 SWA manager.
+std::vector<int32_t> build_grouped_prefill_swa_slots(const ForwardInput& input,
+                                                     int32_t block_size);
+
 // Computes sequence kv length with platform-specific seq-lens layout handling.
 int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,
                     int32_t seq_id,

@@ -609,6 +609,32 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockDraftSingleRowPerSeq) {
             std::vector<int32_t>({13, 14, 15}));
 }
 
+TEST(SpecDecodeInputBuilderTest, GroupedPrefillBuildsSwaRingSlots) {
+  ForwardInput input;
+  input.input_params.meta.num_sequences = 2;
+  input.positions_host = torch::tensor({2, 3, 4, 6, 7}, torch::kInt);
+  input.input_params.attention.host.q_seq_lens = to_layout_seq_lens({3, 2});
+  input.input_params.attention.host.kv_seq_lens = to_layout_seq_lens({5, 8});
+  input.input_params.multi_block_tables = {
+      torch::tensor({{10, 11}, {20, 21}}, torch::kInt)};
+
+  EXPECT_EQ(build_grouped_prefill_swa_slots(input, /*block_size=*/4),
+            std::vector<int32_t>({42, 43, 44, 86, 87}));
+}
+
+TEST(SpecDecodeInputBuilderTest, GroupedPrefillSwaSlotsWrapRing) {
+  ForwardInput input;
+  input.input_params.meta.num_sequences = 1;
+  input.positions_host = torch::tensor({8, 9, 10}, torch::kInt);
+  input.input_params.attention.host.q_seq_lens = to_layout_seq_lens({3});
+  input.input_params.attention.host.kv_seq_lens = to_layout_seq_lens({11});
+  input.input_params.multi_block_tables = {
+      torch::tensor({{10, 11}}, torch::kInt)};
+
+  EXPECT_EQ(build_grouped_prefill_swa_slots(input, /*block_size=*/4),
+            std::vector<int32_t>({40, 41, 42}));
+}
+
 TEST(SpecDecodeInputBuilderTest, MultiBlockKeepsSparseAbsoluteRows) {
   std::vector<int32_t> kv_seq_lens = to_layout_seq_lens({24, 20});
   torch::Tensor positions = torch::tensor({23, 19}, torch::kInt);

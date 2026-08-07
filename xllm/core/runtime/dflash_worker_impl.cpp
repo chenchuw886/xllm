@@ -564,17 +564,25 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
         static_cast<size_t>(processed_target_input.positions_host.numel())};
     CHECK_EQ(positions.size(), static_cast<size_t>(embeddings.size(0)))
         << "DFlash prefill hidden/position count mismatch.";
-    const std::vector<int32_t>& processed_new_cache_slots =
-        processed_target_input.input_params.attention.host.new_cache_slots;
-    CHECK_EQ(processed_new_cache_slots.size(), positions.size())
+    torch::Tensor context_cache_slots =
+        processed_target_input.input_params.attention.device.new_cache_slots;
+    if (!processed_target_input.input_params.multi_block_tables.empty()) {
+      const std::vector<int32_t> grouped_swa_slots =
+          specBuilder::build_grouped_prefill_swa_slots(processed_target_input,
+                                                       options_.block_size());
+      c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+      context_cache_slots = cpu_int_vec_to_device(grouped_swa_slots, device_);
+    }
+    CHECK(context_cache_slots.defined())
+        << "DFlash prefill requires context cache slots.";
+    CHECK_EQ(static_cast<size_t>(context_cache_slots.numel()), positions.size())
         << "DFlash prefill hidden/cache slot count mismatch.";
 
     timer.reset();
-    write_context_kv(
-        processed_target_input,
-        embeddings,
-        processed_target_input.positions,
-        processed_target_input.input_params.attention.device.new_cache_slots);
+    write_context_kv(processed_target_input,
+                     embeddings,
+                     processed_target_input.positions,
+                     context_cache_slots);
     COUNTER_ADD(speculative_execution_latency_seconds_draft,
                 timer.elapsed_seconds());
   }
