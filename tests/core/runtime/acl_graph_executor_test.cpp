@@ -50,6 +50,7 @@ limitations under the License.
 #include "core/runtime/mtp_async_state.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
+#include "models/llm/deepseek_v4.h"
 #include "models/model_registry.h"
 #include "tests/npu_test_environment.h"
 
@@ -89,6 +90,38 @@ class AclGraphExecutorTestEnvironment : public ::testing::Environment {
     ::testing::AddGlobalTestEnvironment(new AclGraphExecutorTestEnvironment);
 
 namespace xllm {
+
+TEST(DeepseekV4MetadataInputTest, KeepsOnlyDraftRegisteredBlockTables) {
+  ModelInputParams target_input_params;
+  target_input_params.multi_block_tables = {
+      torch::tensor({{10}}, torch::kInt32),
+      torch::tensor({{20}}, torch::kInt32),
+      torch::tensor({{30}}, torch::kInt32)};
+
+  ModelInputParams draft_input_params = target_input_params;
+  deepseek_v4_clamp_multi_block_tables(draft_input_params,
+                                       /*registered_group_count=*/1);
+
+  ASSERT_EQ(target_input_params.multi_block_tables.size(), 3);
+  ASSERT_EQ(draft_input_params.multi_block_tables.size(), 1);
+  EXPECT_TRUE(torch::equal(draft_input_params.multi_block_tables.front(),
+                           target_input_params.multi_block_tables.front()));
+}
+
+TEST(DeepseekV4MetadataInputTest, PreservesMatchingTargetBlockTables) {
+  ModelInputParams input_params;
+  input_params.multi_block_tables = {torch::tensor({{10}}, torch::kInt32),
+                                     torch::tensor({{20}}, torch::kInt32),
+                                     torch::tensor({{30}}, torch::kInt32)};
+
+  deepseek_v4_clamp_multi_block_tables(input_params,
+                                       /*registered_group_count=*/3);
+
+  ASSERT_EQ(input_params.multi_block_tables.size(), 3);
+  EXPECT_EQ(input_params.multi_block_tables[0].item<int32_t>(), 10);
+  EXPECT_EQ(input_params.multi_block_tables[1].item<int32_t>(), 20);
+  EXPECT_EQ(input_params.multi_block_tables[2].item<int32_t>(), 30);
+}
 
 TEST(AclGraphStaticGraphTaskSignatureTest,
      BuildsSameSignatureFromCaptureAndSignal) {

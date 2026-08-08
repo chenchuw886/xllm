@@ -93,6 +93,17 @@ inline bool deepseek_v4_uses_acl_graph(
 #endif
 }
 
+inline void deepseek_v4_clamp_multi_block_tables(
+    ModelInputParams& input_params,
+    size_t registered_group_count) {
+  // multi_block_tables follows SWA/C4/C128 export order. The DSpark draft
+  // registers only the SWA prefix, while its input is copied from the
+  // three-group target, so discard groups this model cannot consume.
+  if (input_params.multi_block_tables.size() > registered_group_count) {
+    input_params.multi_block_tables.resize(registered_group_count);
+  }
+}
+
 inline size_t deepseek_v4_align_up(size_t value, size_t alignment) {
   return ((value + alignment - 1) / alignment) * alignment;
 }
@@ -657,6 +668,8 @@ class DeepseekV4ModelImpl
     CHECK(deepseek_v4_state != nullptr)
         << "DeepSeek V4 received incompatible graph metadata state";
     auto modified_input_params = input_params;
+    deepseek_v4_clamp_multi_block_tables(modified_input_params,
+                                         group_infos_.size());
     if (modified_input_params.meta.actual_num_sequences == 0) {
       // Graph metadata must keep the bucket-shaped sequence count used during
       // capture/replay. The normal empty-DP fallback intentionally shrinks the
@@ -1186,6 +1199,8 @@ class DeepseekV4ModelImpl
   build_attention_metadata_for_forward(const torch::Tensor& positions,
                                        const ModelInputParams& input_params) {
     auto modified_input_params = input_params;
+    deepseek_v4_clamp_multi_block_tables(modified_input_params,
+                                         group_infos_.size());
     auto& dp_token_nums = modified_input_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
 
