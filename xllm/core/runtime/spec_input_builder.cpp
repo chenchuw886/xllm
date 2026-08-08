@@ -330,7 +330,14 @@ void append_decode_row(const DecodeRowContext& ctx,
   }
   buf.out_positions.emplace_back(new_position);
   if (ctx.model_managed_multiblock) {
-    buf.out_new_cache_slots.emplace_back(0);
+    CHECK(!ctx.multi_block_tables.empty())
+        << "model-managed multiblock input requires an SWA manager";
+    CHECK_LT(static_cast<size_t>(row.seq_id),
+             ctx.multi_block_tables.front().size());
+    buf.out_new_cache_slots.emplace_back(calc_ring_slot_id(
+        new_position,
+        ctx.multi_block_tables.front()[static_cast<size_t>(row.seq_id)],
+        block_size));
     if (row.append_block_table) {
       if (buf.out_multi_block_tables.size() < ctx.multi_block_tables.size()) {
         buf.out_multi_block_tables.resize(ctx.multi_block_tables.size());
@@ -365,8 +372,10 @@ void append_decode_row(const DecodeRowContext& ctx,
   }
 
   if (row.append_kv_len) {
-    int32_t kv_len =
-        calc_kv_len(ctx.kv_seq_lens, row.seq_id, row.position_offset);
+    const int32_t kv_len_offset =
+        row.kv_len_offset.value_or(row.position_offset);
+    const int32_t kv_len =
+        calc_kv_len(ctx.kv_seq_lens, row.seq_id, kv_len_offset);
     update_kv_seq_lens_and_max(
         buf.out_kv_seq_lens, kv_len, buf.meta.kv_max_seq_len);
   }

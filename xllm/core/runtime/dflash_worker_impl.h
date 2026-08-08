@@ -93,6 +93,8 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                                ForwardInput& validate_input);
 
  private:
+  bool uses_dsa_block_parallel_query_rows() const;
+
   void fill_validate_input_from_draft_outputs(const DraftBlock& draft_block,
                                               ForwardInput& validate_input,
                                               Stream& compute_stream);

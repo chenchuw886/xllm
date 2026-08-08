@@ -253,49 +253,6 @@ void scatter_by_slot(torch::Tensor& cache,
   cache_2d.index_copy_(/*dim=*/0, valid_slots, valid_values);
 }
 
-torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
-                                       const torch::Tensor& query_cu_seq_lens,
-                                       const torch::Tensor& seq_lens,
-                                       int64_t window_size,
-                                       int64_t num_speculative_tokens,
-                                       int64_t cache_block_size) {
-  CHECK(block_table.defined() && query_cu_seq_lens.defined() &&
-        seq_lens.defined());
-  CHECK_GT(block_table.size(1), 0);
-  CHECK_GT(cache_block_size, 0);
-
-  const torch::Device device = block_table.device();
-  torch::Tensor q_cu = query_cu_seq_lens.to(device, torch::kLong);
-  torch::Tensor kv_lens = seq_lens.to(device, torch::kLong);
-  torch::Tensor q_lens = q_cu.slice(0, 1) - q_cu.slice(0, 0, q_cu.size(0) - 1);
-  CHECK_EQ(q_lens.numel(), block_table.size(0));
-  CHECK_EQ(kv_lens.numel(), block_table.size(0));
-
-  torch::Tensor prefix_lens = kv_lens - q_lens;
-  torch::Tensor start_pos = (prefix_lens - window_size).clamp_min(0);
-  torch::Tensor visible_lens = kv_lens - start_pos;
-  constexpr int64_t kIndexAlignment = 128;
-  const int64_t min_width = window_size + num_speculative_tokens;
-  const int64_t index_width =
-      ((min_width + kIndexAlignment - 1) / kIndexAlignment) * kIndexAlignment;
-
-  torch::Tensor cols = torch::arange(
-      index_width, torch::TensorOptions().dtype(torch::kLong).device(device));
-  torch::Tensor valid = cols.unsqueeze(0) < visible_lens.unsqueeze(1);
-  torch::Tensor positions = start_pos.unsqueeze(1) + cols.unsqueeze(0);
-  torch::Tensor block_columns =
-      (positions / cache_block_size)
-          .clamp(/*min=*/0, /*max=*/block_table.size(1) - 1);
-  torch::Tensor block_ids =
-      block_table.gather(/*dim=*/1, block_columns.to(torch::kLong));
-  torch::Tensor slot_ids =
-      block_ids * cache_block_size + positions.remainder(cache_block_size);
-  slot_ids = torch::where(valid, slot_ids, torch::full_like(slot_ids, -1));
-  return torch::repeat_interleave(slot_ids, q_lens, /*dim=*/0)
-      .to(torch::kInt32)
-      .unsqueeze(1);
-}
-
 // Pack prefill TND KV [total_tokens, n, d] into temporary PA_ND blocks
 // [num_blocks + 1, block_size, n, d]. This mirrors vllm-ascend's
 // pad_to_blocks path and lets sparse_attn_sharedkv read prefill KV through a
@@ -974,19 +931,6 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                    : as_optional(attn_metadata.actual_seq_lengths_query);
   }
 
-  std::optional<torch::Tensor> ori_sparse_indices = std::nullopt;
-  if (dspark_block_size_ > 0 && compress_ratio_i == 1 && is_chunked_prefill) {
-    const int64_t cache_block_size =
-        ori_kv.defined() && ori_kv.dim() > 1 ? ori_kv.size(1) : 128;
-    ori_sparse_indices =
-        build_dspark_swa_indices(ori_block_table_for_attn,
-                                 attn_metadata.actual_seq_lengths_query,
-                                 attn_metadata.actual_seq_lengths_kv,
-                                 window_size_,
-                                 dspark_block_size_,
-                                 cache_block_size);
-  }
-
   const int64_t ori_win_left =
       dspark_block_size_ > 0
           ? std::max<int64_t>(window_size_ + dspark_block_size_ - 1, 0)
@@ -997,7 +941,10 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       /*ori_kv=*/as_optional(ori_kv_for_attn),
       /*cmp_kv=*/compress_ratio_i > 1 ? as_optional(cmp_kv_for_attn)
                                       : std::nullopt,
-      /*ori_sparse_indices=*/ori_sparse_indices,
+      // CANN 9.0 exposes ori_sparse_indices in the signature but rejects any
+      // non-null value during tiling. DSpark visibility is encoded by q_len=1
+      // row geometry and the widened left window instead.
+      /*ori_sparse_indices=*/std::nullopt,
       /*cmp_sparse_indices=*/
       compress_ratio_i == 4 ? as_optional(compress_topk_idxs) : std::nullopt,
       /*ori_block_table=*/as_optional(ori_block_table_for_attn),

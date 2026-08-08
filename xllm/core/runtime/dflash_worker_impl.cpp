@@ -165,9 +165,9 @@ void build_query_rows(const ForwardInput& input,
                       int32_t num_speculative_tokens,
                       int32_t block_size,
                       bool sample_from_anchor,
+                      bool use_block_parallel_rows,
                       specBuilder::DecodeBuildBuffers& buf,
-                      std::vector<int32_t>& selected_idxes,
-                      std::vector<int32_t>& q_cu_seq_lens) {
+                      std::vector<int32_t>& selected_idxes) {
   const int32_t num_sequences = input.input_params.meta.num_sequences;
   // DFlash: (1 + N) block — slot 0 is the un-selected anchor (real token), the
   // N mask positions are sampled. DSpark: N-wide block — every position is a
@@ -177,6 +177,12 @@ void build_query_rows(const ForwardInput& input,
       sample_from_anchor ? num_speculative_tokens : num_speculative_tokens + 1;
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
+  if (use_block_parallel_rows) {
+    CHECK(sample_from_anchor)
+        << "block-parallel rows require DSpark anchor sampling";
+    CHECK(row_ctx.model_managed_multiblock)
+        << "DSV4 block-parallel rows require grouped KV tables";
+  }
   Slice<int32_t> token_ids = {
       input.token_ids_host.data_ptr<int32_t>(),
       static_cast<size_t>(input.token_ids_host.numel())};
@@ -186,12 +192,14 @@ void build_query_rows(const ForwardInput& input,
   buf.out_token_ids.reserve(num_sequences * query_width);
   buf.out_positions.reserve(num_sequences * query_width);
   buf.out_new_cache_slots.reserve(num_sequences * query_width);
-  buf.out_kv_seq_lens.reserve(num_sequences);
-  buf.out_q_seq_lens.reserve(num_sequences);
+  const int32_t metadata_rows =
+      use_block_parallel_rows ? num_sequences * query_width : num_sequences;
+  buf.out_kv_seq_lens.reserve(metadata_rows);
+  buf.out_q_seq_lens.reserve(metadata_rows);
+  buf.out_q_cu_seq_lens.reserve(metadata_rows + 1);
+  buf.out_q_cu_seq_lens.emplace_back(0);
 
   selected_idxes.reserve(num_sequences * query_width);
-  q_cu_seq_lens.reserve(num_sequences + 1);
-  q_cu_seq_lens.emplace_back(0);
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     for (int32_t query_idx = 0; query_idx < query_width; ++query_idx) {
@@ -199,9 +207,12 @@ void build_query_rows(const ForwardInput& input,
       row.seq_id = seq_id;
       row.token_id = query_idx == 0 ? token_ids[seq_id] : mask_token_id;
       row.position_offset = query_idx;
-      row.append_kv_len = false;
-      row.append_q_len_one = false;
-      row.append_block_table = false;
+      row.append_kv_len = use_block_parallel_rows;
+      row.kv_len_offset = use_block_parallel_rows
+                              ? std::make_optional<int32_t>(query_width - 1)
+                              : std::nullopt;
+      row.append_q_len_one = use_block_parallel_rows;
+      row.append_block_table = use_block_parallel_rows;
       specBuilder::append_decode_row(row_ctx, row, block_size, buf);
       // DFlash skips slot 0 (anchor, not sampled); DSpark samples every slot.
       if (sample_from_anchor || query_idx > 0) {
@@ -209,8 +220,11 @@ void build_query_rows(const ForwardInput& input,
       }
     }
 
-    specBuilder::append_seq_len_by_layout(buf.out_q_seq_lens, query_width);
-    q_cu_seq_lens.emplace_back(q_cu_seq_lens.back() + query_width);
+    if (use_block_parallel_rows) {
+      continue;
+    }
+    specBuilder::append_q_seq_len(
+        buf.out_q_seq_lens, buf.out_q_cu_seq_lens, query_width);
     // kv_len must cover exactly this block's max absolute position (anchor +
     // query_width - 1), not a fixed anchor + num_speculative_tokens: DFlash's
     // (1+N)-wide block and DSpark's N-wide block (sample_from_anchor) advance
@@ -492,6 +506,12 @@ ForwardInput DFlashWorkerImpl::update_input_by_last_step_output(
   return inputs;
 }
 
+bool DFlashWorkerImpl::uses_dsa_block_parallel_query_rows() const {
+  return sample_from_anchor() && draft_impl_ != nullptr &&
+         draft_impl_->context_.get_model_args().model_type() ==
+             "deepseek_v4_dspark";
+}
+
 std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
     const ForwardInput& input) {
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
@@ -508,16 +528,18 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
     return output;
   }
 
-  // Mirror prepare_query_inputs' block-width branch below: an idle DP rank's
-  // dummy query must match the width active ranks build, or DP shape
-  // symmetry breaks for DSpark (sample_from_anchor() == true, N-wide).
+  // Mirror prepare_query_inputs' metadata geometry: DSV4 DSpark represents
+  // every block row as a q_len=1 sequence, while Qwen/DFlash keeps one
+  // query_width-wide sequence.
   const int32_t query_width = sample_from_anchor()
                                   ? options_.num_speculative_tokens()
                                   : options_.num_speculative_tokens() + 1;
+  const bool use_block_parallel_rows = uses_dsa_block_parallel_query_rows();
   ForwardInput query_input = input;
   query_input.input_params.meta.batch_forward_type =
       BatchForwardType::CHUNKED_PREFILL;
-  query_input.input_params.meta.q_max_seq_len = query_width;
+  query_input.input_params.meta.q_max_seq_len =
+      use_block_parallel_rows ? 1 : query_width;
   scale_dp_global_token_nums(query_input.input_params, query_width);
   // Warmup only: prime the draft; its output is unused. Keep it alive until the
   // sync below so the no-sync draft input is not freed while the target forward
@@ -985,15 +1007,15 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
 
   specBuilder::DecodeBuildBuffers buf;
   std::vector<int32_t> selected_idxes;
-  std::vector<int32_t> q_cu_seq_lens;
+  const bool use_block_parallel_rows = uses_dsa_block_parallel_query_rows();
   build_query_rows(input,
                    mask_token_id_,
                    options_.num_speculative_tokens(),
                    options_.block_size(),
                    sample_from_anchor(),
+                   use_block_parallel_rows,
                    buf,
-                   selected_idxes,
-                   q_cu_seq_lens);
+                   selected_idxes);
   // DFlash: (1 + N) rows per seq; DSpark (sample_from_anchor): N rows.
   const int32_t query_width = sample_from_anchor()
                                   ? options_.num_speculative_tokens()
@@ -1013,14 +1035,21 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
                                           input.token_ids.options(),
                                           input.positions.options());
   input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  if (use_block_parallel_rows) {
+    input_params.meta.num_sequences = num_sequences_query * query_width;
+    if (input_params.meta.actual_num_sequences > 0) {
+      input_params.meta.actual_num_sequences *= query_width;
+    }
+  }
   specBuilder::update_input_params(input_params,
                                    buf,
-                                   query_width,
+                                   use_block_parallel_rows ? 1 : query_width,
                                    std::move(buf.out_q_seq_lens),
-                                   std::move(q_cu_seq_lens),
+                                   std::move(buf.out_q_cu_seq_lens),
                                    buf.meta.kv_max_seq_len,
                                    std::move(buf.out_kv_seq_lens),
-                                   /*update_block_tables=*/false);
+                                   /*update_block_tables=*/
+                                   use_block_parallel_rows);
   scale_dp_global_token_nums(input_params, query_width);
   input_params.attention.rebuild_device_buffer(device_);
 

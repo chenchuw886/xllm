@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -79,6 +80,9 @@ struct RowSpec {
   int32_t position_offset = 0;
   bool append_token = true;
   bool append_kv_len = true;
+  // When set, decouples the visible KV extent from this row's position. This
+  // lets block-parallel draft rows share the full block KV length.
+  std::optional<int32_t> kv_len_offset;
   bool append_q_len_one = false;
   bool append_block_table = false;
 };

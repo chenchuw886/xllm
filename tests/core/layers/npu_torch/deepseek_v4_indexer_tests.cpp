@@ -148,6 +148,35 @@ TEST_F(DeepseekV4IndexerTest, DsaSwaBlockTableUsesLogicalColumnsWithoutWrap) {
   EXPECT_TRUE(torch::equal(dsa.slot_mappings[0][0].cpu(), expected_slot));
 }
 
+TEST_F(DeepseekV4IndexerTest, DsaSwaUsesExplicitBlockParallelSlots) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.num_sequences = 3;
+  params.meta.q_max_seq_len = 1;
+  params.meta.kv_max_seq_len = 8;
+  params.attention.host.kv_seq_lens = {8, 8, 8};
+  params.attention.host.q_seq_lens = {1, 1, 1};
+  params.attention.host.new_cache_slots = {5, 6, 7};
+  params.multi_block_tables = {
+      torch::tensor({{0, 1, 2}, {0, 1, 2}, {0, 1, 2}}, torch::kInt32)};
+
+  const torch::Tensor positions = torch::tensor({5, 6, 7}, torch::kInt64);
+  const std::vector<DSAGroupInfo> group_infos = {
+      {DSACacheType::SLIDING_WINDOW, 1, 4}};
+  const std::vector<std::vector<DSACacheInfo>> caches_info = {{
+      {0, DSACacheType::SLIDING_WINDOW, 1, 4},
+  }};
+
+  const AttentionMetadata metadata = DSAMetadataBuilder::build(
+      params, positions, torch::Tensor(), caches_info, group_infos);
+
+  ASSERT_TRUE(metadata.dsa_metadata != nullptr);
+  ASSERT_EQ(metadata.dsa_metadata->slot_mappings.size(), 1);
+  ASSERT_EQ(metadata.dsa_metadata->slot_mappings[0].size(), 1);
+  EXPECT_TRUE(torch::equal(metadata.dsa_metadata->slot_mappings[0][0],
+                           torch::tensor({5, 6, 7}, torch::kInt32)));
+}
+
 TEST_F(DeepseekV4IndexerTest, DsaDummyAttentionUsesPositionDevice) {
   ModelInputParams params;
   params.meta.batch_forward_type = BatchForwardType::DECODE;
