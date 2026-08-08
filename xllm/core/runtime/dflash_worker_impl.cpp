@@ -497,15 +497,10 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
     std::optional<ForwardOutput> output =
         run_llm_no_sync_impl(*impl_, input, *prepare_stream_, *compute_stream_);
-    // Warmup only: prime the draft; its output is unused. Keep it alive until
-    // the sync below so the no-sync draft input is not freed while its kernel
-    // is still in flight.
-    std::optional<ForwardOutput> draft_output = run_llm_no_sync_impl(
-        *draft_impl_, input, *prepare_stream_, *compute_stream_);
-    // Both forwards launched no-sync, so their staged inputs and the returned
-    // target output are still in flight. Sync before returning so a DP idle
-    // rank or graph warmup cannot reuse the input buffers, and non-overlap
-    // callers do not observe an unfinished target output.
+    // Active prefill ranks write the draft context KV without a draft forward.
+    // Keep idle ranks symmetric: a draft MoE forward here would enter EP
+    // collectives that active ranks never join and deadlock the whole group.
+    // Sync the target forward before its staged input can be reused.
     compute_stream_->synchronize();
     if (output.has_value()) {
       clear_all_output_embeddings(output.value());
